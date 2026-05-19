@@ -38,6 +38,7 @@ type BufferedAmountFunc func() uint64
 // Stream is a single logical TCP connection multiplexed over the DataChannel.
 type Stream struct {
 	id      uint32
+	target  string // remote addr:port requested by OpenStream
 	recvCh  chan []byte
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -48,6 +49,9 @@ type Stream struct {
 
 // ID returns the stream identifier.
 func (s *Stream) ID() uint32 { return s.id }
+
+// Target returns the remote addr:port this stream was opened for.
+func (s *Stream) Target() string { return s.target }
 
 // Read blocks until data is available or the stream is closed.
 // It implements io.Reader so the stream can be used with io.Copy.
@@ -115,6 +119,10 @@ type Session struct {
 	// onKeyRotate is called when a CmdKeyRotate frame is received.
 	// The caller can use it to persist the new key.
 	onKeyRotate func(newHexKey string)
+
+	// onIncomingStream is called when the peer opens a new stream (CmdOpen).
+	// The callee is responsible for serving the stream (dial target, pipe data).
+	onIncomingStream func(st *Stream)
 }
 
 // NewSession creates a new multiplexer session.
@@ -133,6 +141,13 @@ func NewSession(send SendFunc, buffered BufferedAmountFunc, c *crypto.Cipher, lo
 // SetOnKeyRotate registers a callback invoked when the peer sends a key rotation frame.
 func (s *Session) SetOnKeyRotate(fn func(newHexKey string)) {
 	s.onKeyRotate = fn
+}
+
+// SetOnIncomingStream registers a callback invoked when the peer opens a new stream.
+// The callback is called in a new goroutine for each incoming CmdOpen frame.
+// Use this on the Joiner (responder) side to accept tunnel connections.
+func (s *Session) SetOnIncomingStream(fn func(st *Stream)) {
+	s.onIncomingStream = fn
 }
 
 // RotateKey generates a new random 32-byte key, sends CmdKeyRotate to the peer,
@@ -228,10 +243,13 @@ func (s *Session) Deliver(raw []byte) {
 			s.log.Debug("pong received", "rtt", rtt)
 		}
 	case CmdOpen:
-		// Creator side: accept an incoming stream from Joiner.
-		st := s.newStream(context.Background(), f.StreamID)
-		_ = st
-		s.log.Debug("incoming stream", "stream_id", f.StreamID, "target", string(plaintext))
+		// Responder side: peer opened a new stream.
+		target := string(plaintext)
+		st := s.newStreamWithTarget(context.Background(), f.StreamID, target)
+		s.log.Debug("incoming stream", "stream_id", f.StreamID, "target", target)
+		if s.onIncomingStream != nil {
+			go s.onIncomingStream(st)
+		}
 	case CmdData:
 		s.deliverData(f.StreamID, plaintext)
 	case CmdClose, CmdRST:
@@ -294,9 +312,14 @@ func (s *Session) CloseAll() {
 // --- internal helpers ---
 
 func (s *Session) newStream(ctx context.Context, id uint32) *Stream {
+	return s.newStreamWithTarget(ctx, id, "")
+}
+
+func (s *Session) newStreamWithTarget(ctx context.Context, id uint32, target string) *Stream {
 	sCtx, cancel := context.WithCancel(ctx)
 	st := &Stream{
 		id:      id,
+		target:  target,
 		recvCh:  make(chan []byte, 64),
 		ctx:     sCtx,
 		cancel:  cancel,
@@ -341,13 +364,14 @@ func (s *Session) sendFrame(streamID uint32, cmd Cmd, seq uint64, plaintext []by
 	}
 
 	var encrypted []byte
+	var usedSeq uint64
 	if len(plaintext) > 0 {
 		s.cipherMu.RLock()
-		encrypted = s.cipher.Seal(plaintext)
+		encrypted, usedSeq = s.cipher.Seal(plaintext)
 		s.cipherMu.RUnlock()
 	}
 
-	raw, err := EncodeFrame(streamID, cmd, seq, encrypted)
+	raw, err := EncodeFrame(streamID, cmd, usedSeq, encrypted)
 	if err != nil {
 		return err
 	}

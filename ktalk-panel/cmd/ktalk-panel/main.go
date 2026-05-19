@@ -179,6 +179,16 @@ func buildRouter(store *config.Store, sup *supervisor.Supervisor, broker *sse.Br
 	// Subscription endpoint (public but secret-token gated)
 	mux.HandleFunc("/sub/", handleSubscription(store))
 
+	// Health + metrics (unauthenticated — safe for internal monitoring)
+	startTime := time.Now()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status": "ok",
+			"uptime": time.Since(startTime).Truncate(time.Second).String(),
+		})
+	})
+	mux.HandleFunc("/metrics", handleMetrics(sup, startTime))
+
 	return securityHeaders(mux)
 }
 
@@ -546,6 +556,45 @@ func clientIP(r *http.Request) string {
 	}
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return host
+}
+
+// handleMetrics serves a Prometheus-compatible text exposition of panel metrics.
+//
+// Exposed metrics:
+//
+//	ktalk_tunnels_active          — number of currently running processes
+//	ktalk_tunnels_total           — total processes ever started (running + stopped)
+//	ktalk_restarts_total          — sum of all per-process restart counters
+//	ktalk_panel_uptime_seconds    — panel uptime in seconds
+func handleMetrics(sup *supervisor.Supervisor, startTime time.Time) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		states := sup.State()
+
+		var active, total, restarts int
+		for _, s := range states {
+			total++
+			if s.Running {
+				active++
+			}
+			restarts += s.Restarts
+		}
+		uptime := time.Since(startTime).Seconds()
+
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "# HELP ktalk_tunnels_active Number of currently running tunnel processes\n")
+		fmt.Fprintf(w, "# TYPE ktalk_tunnels_active gauge\n")
+		fmt.Fprintf(w, "ktalk_tunnels_active %d\n", active)
+		fmt.Fprintf(w, "# HELP ktalk_tunnels_total Total tunnel clients configured\n")
+		fmt.Fprintf(w, "# TYPE ktalk_tunnels_total gauge\n")
+		fmt.Fprintf(w, "ktalk_tunnels_total %d\n", total)
+		fmt.Fprintf(w, "# HELP ktalk_restarts_total Total process restart events across all tunnels\n")
+		fmt.Fprintf(w, "# TYPE ktalk_restarts_total counter\n")
+		fmt.Fprintf(w, "ktalk_restarts_total %d\n", restarts)
+		fmt.Fprintf(w, "# HELP ktalk_panel_uptime_seconds Panel process uptime in seconds\n")
+		fmt.Fprintf(w, "# TYPE ktalk_panel_uptime_seconds gauge\n")
+		fmt.Fprintf(w, "ktalk_panel_uptime_seconds %.1f\n", uptime)
+	}
 }
 
 func findCoreBinary() (string, error) {
