@@ -1,0 +1,70 @@
+     1	name: CI
+     2	
+     3	on:
+     4	  push:
+     5	    branches: [main, genspark_ai_developer]
+     6	  pull_request:
+     7	    branches: [main]
+     8	
+     9	jobs:
+    10	  test-core:
+    11	    name: ktalk-core — lint + test
+    12	    runs-on: ubuntu-latest
+    13	    steps:
+    14	      - uses: actions/checkout@v4
+    15	      - uses: actions/setup-go@v5
+    16	        with:
+    17	          go-version: '1.22'
+    18	          cache-dependency-path: ktalk-core/go.sum
+    19	      - name: go fmt
+    20	        run: cd ktalk-core && gofmt -l . | tee /dev/stderr | (! grep .)
+    21	      - name: go vet
+    22	        run: cd ktalk-core && go vet ./...
+    23	      - name: go test
+    24	        run: cd ktalk-core && go test -race -count=1 ./...
+    25	
+    26	  test-panel:
+    27	    name: ktalk-panel — lint + test
+    28	    runs-on: ubuntu-latest
+    29	    steps:
+    30	      - uses: actions/checkout@v4
+    31	      - uses: actions/setup-go@v5
+    32	        with:
+    33	          go-version: '1.22'
+    34	          cache-dependency-path: ktalk-panel/go.sum
+    35	      - name: go fmt
+    36	        run: cd ktalk-panel && gofmt -l . | tee /dev/stderr | (! grep .)
+    37	      - name: go vet
+    38	        run: cd ktalk-panel && go vet ./...
+    39	      - name: go test
+    40	        run: cd ktalk-panel && go test -race -count=1 ./...
+    41	
+    42	  build-release:
+    43	    name: Build release binaries
+    44	    runs-on: ubuntu-latest
+    45	    needs: [test-core, test-panel]
+    46	    if: github.ref == 'refs/heads/main'
+    47	    steps:
+    48	      - uses: actions/checkout@v4
+    49	      - uses: actions/setup-go@v5
+    50	        with:
+    51	          go-version: '1.22'
+    52	      - uses: pnpm/action-setup@v3
+    53	        with:
+    54	          version: 9
+    55	      - uses: actions/setup-node@v4
+    56	        with:
+    57	          node-version: 20
+    58	          cache: pnpm
+    59	          cache-dependency-path: ktalk-panel/web/pnpm-lock.yaml
+    60	      - name: Build frontend
+    61	        run: cd ktalk-panel/web && pnpm install --frozen-lockfile && pnpm build
+    62	      - name: Build linux/amd64
+    63	        run: make build-linux-amd64
+    64	      - name: Build linux/arm64
+    65	        run: make build-linux-arm64
+    66	      - uses: actions/upload-artifact@v4
+    67	        with:
+    68	          name: ktalk-binaries
+    69	          path: dist/
+    70	          retention-days: 30
