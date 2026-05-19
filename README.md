@@ -82,3 +82,4 @@ curl -fsSL https://releases.example.com/ktalk/install.sh | \
 - All public Go functions documented
 - No hardcoded secrets — keys via config/env only
 - Conventional commits: `feat:`, `fix:`, `chore:`
+# Sprint roadmap added

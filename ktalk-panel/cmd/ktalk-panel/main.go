@@ -18,6 +18,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/private/ktalk-panel/internal/auth"
 	"github.com/private/ktalk-panel/internal/config"
+	"github.com/private/ktalk-panel/internal/sse"
 	"github.com/private/ktalk-panel/internal/supervisor"
 )
 
@@ -96,7 +98,13 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	mux := buildRouter(store, sup, log)
+	broker := sse.New(log.With("component", "sse"))
+	go broker.Run(func() any { return sup.State() })
+
+	rotator := supervisor.NewKeyRotator(store, sup, log.With("component", "rotator"))
+	go rotator.Run(ctx)
+
+	mux := buildRouter(store, sup, broker, log)
 
 	addr := net.JoinHostPort(cfg.ListenAddr, strconv.Itoa(port))
 	srv := &http.Server{
@@ -126,7 +134,7 @@ func run() error {
 	}
 }
 
-func buildRouter(store *config.Store, sup *supervisor.Supervisor, log *slog.Logger) http.Handler {
+func buildRouter(store *config.Store, sup *supervisor.Supervisor, broker *sse.Broker, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 
 	// Static files (embedded SvelteKit build)
@@ -135,9 +143,19 @@ func buildRouter(store *config.Store, sup *supervisor.Supervisor, log *slog.Logg
 		mux.Handle("/", http.FileServer(http.FS(staticFS)))
 	}
 
-	// Admin redirect
+	// Admin SPA — serve index.html for /admin (SPA catch-all)
 	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, http.FS(staticFS), "index.html")
+		f, err := staticFS.Open("index.html")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer f.Close()
+		fi, _ := f.Stat()
+		http.ServeContent(w, r, "index.html", fi.ModTime(), f.(interface {
+			fs.File
+			io.ReadSeeker
+		}))
 	})
 
 	// Auth endpoints (no session required)
@@ -156,6 +174,7 @@ func buildRouter(store *config.Store, sup *supervisor.Supervisor, log *slog.Logg
 	mux.Handle("/api/clients/", protected(handleClient(store, sup, log)))
 	mux.Handle("/api/state", protected(handleState(sup)))
 	mux.Handle("/api/logs/", protected(handleLogs(sup)))
+	mux.Handle("/api/events", auth.Middleware(sessions, broker))
 
 	// Subscription endpoint (public but secret-token gated)
 	mux.HandleFunc("/sub/", handleSubscription(store))
@@ -485,12 +504,20 @@ func encodeBase64URL(b []byte) string {
 	for i := 0; i < len(b); i += 3 {
 		b0 := b[i]
 		var b1, b2 byte
-		if i+1 < len(b) { b1 = b[i+1] }
-		if i+2 < len(b) { b2 = b[i+2] }
+		if i+1 < len(b) {
+			b1 = b[i+1]
+		}
+		if i+2 < len(b) {
+			b2 = b[i+2]
+		}
 		out = append(out, alpha[b0>>2])
 		out = append(out, alpha[(b0&3)<<4|b1>>4])
-		if i+1 < len(b) { out = append(out, alpha[(b1&0xf)<<2|b2>>6]) }
-		if i+2 < len(b) { out = append(out, alpha[b2&0x3f]) }
+		if i+1 < len(b) {
+			out = append(out, alpha[(b1&0xf)<<2|b2>>6])
+		}
+		if i+2 < len(b) {
+			out = append(out, alpha[b2&0x3f])
+		}
 	}
 	return string(out)
 }

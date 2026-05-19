@@ -22,30 +22,30 @@ import (
 
 // Jingle is the top-level <jingle> element.
 type Jingle struct {
-	XMLName     xml.Name    `xml:"urn:xmpp:jingle:1 jingle"`
-	Action      string      `xml:"action,attr"`
-	SID         string      `xml:"sid,attr"`
-	Initiator   string      `xml:"initiator,attr,omitempty"`
-	Responder   string      `xml:"responder,attr,omitempty"`
-	Contents    []Content   `xml:"content"`
+	XMLName   xml.Name  `xml:"urn:xmpp:jingle:1 jingle"`
+	Action    string    `xml:"action,attr"`
+	SID       string    `xml:"sid,attr"`
+	Initiator string    `xml:"initiator,attr,omitempty"`
+	Responder string    `xml:"responder,attr,omitempty"`
+	Contents  []Content `xml:"content"`
 }
 
 // Content is a single media or data content block.
 type Content struct {
-	Creator     string      `xml:"creator,attr"`
-	Name        string      `xml:"name,attr"`
-	Senders     string      `xml:"senders,attr,omitempty"`
+	Creator     string       `xml:"creator,attr"`
+	Name        string       `xml:"name,attr"`
+	Senders     string       `xml:"senders,attr,omitempty"`
 	Description *Description `xml:"description,omitempty"`
 	Transport   *Transport   `xml:"transport,omitempty"`
 }
 
 // Description holds RTP codec info (XEP-0167).
 type Description struct {
-	XMLName    xml.Name    `xml:"urn:xmpp:jingle:apps:rtp:1 description"`
-	Media      string      `xml:"media,attr"`
+	XMLName      xml.Name      `xml:"urn:xmpp:jingle:apps:rtp:1 description"`
+	Media        string        `xml:"media,attr"`
 	PayloadTypes []PayloadType `xml:"payload-type"`
-	Sources    []Source    `xml:"urn:ietf:rfc:5576 source"`
-	RTPHdrExts []RTPHdrExt `xml:"urn:xmpp:jingle:apps:rtp:rtp-hdrext:0 rtp-hdrext"`
+	Sources      []Source      `xml:"urn:ietf:rfc:5576 source"`
+	RTPHdrExts   []RTPHdrExt   `xml:"urn:xmpp:jingle:apps:rtp:rtp-hdrext:0 rtp-hdrext"`
 }
 
 // PayloadType describes a codec.
@@ -76,10 +76,10 @@ type RTPHdrExt struct {
 
 // Transport holds ICE candidates (XEP-0176).
 type Transport struct {
-	XMLName    xml.Name    `xml:"urn:xmpp:jingle:transports:ice-udp:1 transport"`
-	Ufrag      string      `xml:"ufrag,attr,omitempty"`
-	Pwd        string      `xml:"pwd,attr,omitempty"`
-	Candidates []Candidate `xml:"candidate"`
+	XMLName     xml.Name     `xml:"urn:xmpp:jingle:transports:ice-udp:1 transport"`
+	Ufrag       string       `xml:"ufrag,attr,omitempty"`
+	Pwd         string       `xml:"pwd,attr,omitempty"`
+	Candidates  []Candidate  `xml:"candidate"`
 	Fingerprint *Fingerprint `xml:"urn:xmpp:jingle:apps:dtls:0 fingerprint,omitempty"`
 }
 
@@ -101,9 +101,9 @@ type Candidate struct {
 
 // Fingerprint holds the DTLS fingerprint.
 type Fingerprint struct {
-	Hash    string `xml:"hash,attr"`
-	Setup   string `xml:"setup,attr,omitempty"`
-	Value   string `xml:",chardata"`
+	Hash  string `xml:"hash,attr"`
+	Setup string `xml:"setup,attr,omitempty"`
+	Value string `xml:",chardata"`
 }
 
 // --- SDP conversion ---
@@ -266,8 +266,8 @@ func JingleToSDP(j *Jingle) (string, error) {
 	return sb.String(), nil
 }
 
-// MarshalXML returns the XML representation of the Jingle stanza.
-func (j *Jingle) MarshalXML() (string, error) {
+// ToXML returns the XML representation of the Jingle stanza.
+func (j *Jingle) ToXML() (string, error) {
 	raw, err := xml.Marshal(j)
 	if err != nil {
 		return "", fmt.Errorf("jingle marshal: %w", err)

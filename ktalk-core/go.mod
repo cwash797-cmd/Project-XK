@@ -28,4 +28,5 @@ require (
 	github.com/wlynxg/anet v0.0.3 // indirect
 	golang.org/x/net v0.29.0 // indirect
 	golang.org/x/sys v0.26.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

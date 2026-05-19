@@ -3,6 +3,7 @@ package muxer
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,10 @@ import (
 
 	"github.com/private/ktalk-core/internal/crypto"
 )
+
+// cryptoRand wraps rand.Read so we can reference it without colliding with
+// the crypto/rand import name used in frame.go.
+var cryptoRand = rand.Read
 
 const (
 	// PingInterval is how often keepalive pings are sent.
@@ -32,15 +37,20 @@ type BufferedAmountFunc func() uint64
 
 // Stream is a single logical TCP connection multiplexed over the DataChannel.
 type Stream struct {
-	id       uint32
-	recvCh   chan []byte
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	closed   bool
+	id      uint32
+	recvCh  chan []byte
+	ctx     context.Context
+	cancel  context.CancelFunc
+	mu      sync.Mutex
+	closed  bool
+	session *Session // back-reference for SendData
 }
 
+// ID returns the stream identifier.
+func (s *Stream) ID() uint32 { return s.id }
+
 // Read blocks until data is available or the stream is closed.
+// It implements io.Reader so the stream can be used with io.Copy.
 func (s *Stream) Read(buf []byte) (int, error) {
 	select {
 	case data, ok := <-s.recvCh:
@@ -54,29 +64,57 @@ func (s *Stream) Read(buf []byte) (int, error) {
 	}
 }
 
-// Close signals that this stream is done.
-func (s *Stream) Close() {
+// SendData sends a DATA frame for this stream via the owning Session.
+// It implements io.Writer semantics for use with io.Copy.
+func (s *Stream) SendData(data []byte) error {
+	if s.session == nil {
+		return fmt.Errorf("stream %d: no session", s.id)
+	}
+	return s.session.SendData(s.id, data)
+}
+
+// Write implements io.Writer by calling SendData.
+func (s *Stream) Write(p []byte) (int, error) {
+	if err := s.SendData(p); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// Close signals that this stream is done and sends a CLOSE frame.
+func (s *Stream) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.closed {
+	already := s.closed
+	if !already {
 		s.closed = true
 		s.cancel()
 	}
+	s.mu.Unlock()
+	if !already && s.session != nil {
+		_ = s.session.CloseStream(s.id)
+	}
+	return nil
 }
 
 // Session multiplexes multiple logical streams over a single DataChannel.
 type Session struct {
-	send         SendFunc
-	buffered     BufferedAmountFunc
-	cipher       *crypto.Cipher
-	log          *slog.Logger
+	send     SendFunc
+	buffered BufferedAmountFunc
+	log      *slog.Logger
+
+	cipherMu sync.RWMutex
+	cipher   *crypto.Cipher
 
 	mu           sync.RWMutex
 	streams      map[uint32]*Stream
 	nextStreamID atomic.Uint32
 
-	lastPong   atomic.Int64 // unix nano
-	closed     atomic.Bool
+	lastPong atomic.Int64 // unix nano
+	closed   atomic.Bool
+
+	// onKeyRotate is called when a CmdKeyRotate frame is received.
+	// The caller can use it to persist the new key.
+	onKeyRotate func(newHexKey string)
 }
 
 // NewSession creates a new multiplexer session.
@@ -90,6 +128,39 @@ func NewSession(send SendFunc, buffered BufferedAmountFunc, c *crypto.Cipher, lo
 	}
 	s.lastPong.Store(time.Now().UnixNano())
 	return s
+}
+
+// SetOnKeyRotate registers a callback invoked when the peer sends a key rotation frame.
+func (s *Session) SetOnKeyRotate(fn func(newHexKey string)) {
+	s.onKeyRotate = fn
+}
+
+// RotateKey generates a new random 32-byte key, sends CmdKeyRotate to the peer,
+// and immediately switches the local cipher to the new key.
+// The new hex key is returned so the caller can persist it.
+func (s *Session) RotateKey() (string, error) {
+	newKey := make([]byte, crypto.KeySize)
+	if _, err := cryptoRand(newKey); err != nil {
+		return "", fmt.Errorf("session: generate new key: %w", err)
+	}
+	newCipher, err := crypto.New(newKey)
+	if err != nil {
+		return "", fmt.Errorf("session: build new cipher: %w", err)
+	}
+
+	// Send the raw key as payload (sealed with the OLD cipher — last frame on old key).
+	if err := s.sendFrame(0, CmdKeyRotate, 0, newKey); err != nil {
+		return "", fmt.Errorf("session: send key rotate frame: %w", err)
+	}
+
+	// Switch local cipher.
+	s.cipherMu.Lock()
+	s.cipher = newCipher
+	s.cipherMu.Unlock()
+
+	hexKey := fmt.Sprintf("%x", newKey)
+	s.log.Info("key rotated (initiator)")
+	return hexKey, nil
 }
 
 // OpenStream allocates a new stream ID and sends a CmdOpen frame.
@@ -113,10 +184,13 @@ func (s *Session) Deliver(raw []byte) {
 		return
 	}
 
-	// Decrypt payload
+	// Decrypt payload using current cipher.
 	var plaintext []byte
 	if len(f.Payload) > 0 {
-		plaintext, err = s.cipher.Open(f.Seq, f.Payload)
+		s.cipherMu.RLock()
+		c := s.cipher
+		s.cipherMu.RUnlock()
+		plaintext, err = c.Open(f.Seq, f.Payload)
 		if err != nil {
 			s.log.Warn("decrypt frame failed", "stream_id", f.StreamID, "seq", f.Seq, "err", err)
 			return
@@ -124,6 +198,26 @@ func (s *Session) Deliver(raw []byte) {
 	}
 
 	switch f.Cmd {
+	case CmdKeyRotate:
+		// Peer initiated key rotation — plaintext is the new 32-byte raw key.
+		if len(plaintext) != crypto.KeySize {
+			s.log.Warn("key rotate: bad payload length", "len", len(plaintext))
+			return
+		}
+		newCipher, err := crypto.New(plaintext)
+		if err != nil {
+			s.log.Warn("key rotate: build cipher", "err", err)
+			return
+		}
+		s.cipherMu.Lock()
+		s.cipher = newCipher
+		s.cipherMu.Unlock()
+		hexKey := fmt.Sprintf("%x", plaintext)
+		s.log.Info("key rotated (responder)")
+		if s.onKeyRotate != nil {
+			go s.onKeyRotate(hexKey)
+		}
+
 	case CmdPing:
 		_ = s.sendFrame(0, CmdPong, 0, plaintext)
 	case CmdPong:
@@ -202,10 +296,11 @@ func (s *Session) CloseAll() {
 func (s *Session) newStream(ctx context.Context, id uint32) *Stream {
 	sCtx, cancel := context.WithCancel(ctx)
 	st := &Stream{
-		id:     id,
-		recvCh: make(chan []byte, 64),
-		ctx:    sCtx,
-		cancel: cancel,
+		id:      id,
+		recvCh:  make(chan []byte, 64),
+		ctx:     sCtx,
+		cancel:  cancel,
+		session: s,
 	}
 	s.mu.Lock()
 	s.streams[id] = st
@@ -247,8 +342,9 @@ func (s *Session) sendFrame(streamID uint32, cmd Cmd, seq uint64, plaintext []by
 
 	var encrypted []byte
 	if len(plaintext) > 0 {
+		s.cipherMu.RLock()
 		encrypted = s.cipher.Seal(plaintext)
-		// Use the send sequence counter from cipher for the frame seq field
+		s.cipherMu.RUnlock()
 	}
 
 	raw, err := EncodeFrame(streamID, cmd, seq, encrypted)

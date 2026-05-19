@@ -1,0 +1,26 @@
+[Unit]
+Description=Project-XK Admin Panel
+Documentation=https://github.com/cwash797-cmd/Project-XK
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=xk
+Group=xk
+ExecStart=/usr/local/bin/ktalk-panel -config /etc/ktalk-panel/config.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+LimitNOFILE=65536
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/etc/ktalk-panel /var/lib/ktalk-panel
+PrivateTmp=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

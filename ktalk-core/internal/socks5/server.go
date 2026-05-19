@@ -24,7 +24,7 @@ import (
 const (
 	socks5Version = 0x05
 
-	authNone    = 0x00
+	authNone     = 0x00
 	authUserPass = 0x02
 	authNoAccept = 0xFF
 
@@ -36,10 +36,10 @@ const (
 	atypDomain = 0x03
 	atypIPv6   = 0x04
 
-	repSuccess            = 0x00
-	repGeneralFailure     = 0x01
-	repConnRefused        = 0x05
-	repCommandNotSupported = 0x07
+	repSuccess              = 0x00
+	repGeneralFailure       = 0x01
+	repConnRefused          = 0x05
+	repCommandNotSupported  = 0x07
 	repAddrTypeNotSupported = 0x08
 )
 
@@ -61,9 +61,9 @@ type Config struct {
 
 // Server is a SOCKS5 proxy server.
 type Server struct {
-	cfg    Config
-	log    *slog.Logger
-	ln     net.Listener
+	cfg Config
+	log *slog.Logger
+	ln  net.Listener
 }
 
 // New creates a new SOCKS5 server but does not start it.

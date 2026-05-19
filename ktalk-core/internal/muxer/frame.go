@@ -40,6 +40,10 @@ const (
 	CmdPing Cmd = 0x05
 	// CmdPong is the response to a ping. Payload mirrors the ping payload.
 	CmdPong Cmd = 0x06
+	// CmdKeyRotate signals a key rotation. Payload is the new 32-byte raw key.
+	// The sender switches to the new key immediately after sending this frame.
+	// The receiver must switch to the new key before sending any reply.
+	CmdKeyRotate Cmd = 0x07
 )
 
 // HeaderSize is the number of bytes in the fixed-size frame header.
@@ -78,6 +82,8 @@ func (c Cmd) String() string {
 		return "PING"
 	case CmdPong:
 		return "PONG"
+	case CmdKeyRotate:
+		return "KEY_ROTATE"
 	default:
 		return fmt.Sprintf("CMD(0x%02x)", byte(c))
 	}

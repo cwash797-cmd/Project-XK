@@ -19,12 +19,12 @@ import (
 )
 
 const (
-	cookieName     = "ktalk_session"
-	sessionTTL     = 24 * time.Hour
-	bcryptCost     = 12
-	tokenLen       = 32
-	maxLoginFails  = 10
-	lockoutPeriod  = 5 * time.Minute
+	cookieName    = "ktalk_session"
+	sessionTTL    = 24 * time.Hour
+	bcryptCost    = 12
+	tokenLen      = 32
+	maxLoginFails = 10
+	lockoutPeriod = 5 * time.Minute
 )
 
 // SessionStore manages active admin sessions.
