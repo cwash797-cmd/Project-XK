@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Mode determines which side of the tunnel this process is.
@@ -49,34 +52,100 @@ type RoomConfig struct {
 	// Subdomain is the subdomain of ktalk.ru to connect to, e.g. "ilte0310".
 	Subdomain string `json:"subdomain" yaml:"subdomain"`
 
-	// RoomID is the room path segment, e.g. "abcdef123456".
+	// RoomID is the short room name (path segment), e.g. "cb140blkff7i".
+	// This is the "roomName" field from GET /api/rooms/<room-id>.
 	RoomID string `json:"room_id" yaml:"room_id"`
+
+	// ConferenceID is the full conference identifier returned by GET /api/rooms/<room-id>
+	// as the "conferenceId" field. It has the form "<roomName>_<hex-hash>" and is used
+	// as the room= query parameter in the XMPP WebSocket URL.
+	// Example: "cb140blkff7i_3074b65d29905f8e4418e2113a329f487fcadc8e4ed58df7b108624d199a4110"
+	//
+	// CRITICAL: This is NOT the same as RoomID. If empty, WSSUrl falls back to RoomID
+	// for backwards compat, but production MUST populate this from the API response.
+	ConferenceID string `json:"conference_id,omitempty" yaml:"conference_id,omitempty"`
 
 	// Hash is the optional #hash appended to the room URL.
 	Hash string `json:"hash,omitempty" yaml:"hash,omitempty"`
 }
 
+// Domain returns the full domain for this room's Jitsi shard.
+func (r RoomConfig) Domain() string {
+	return fmt.Sprintf("%s.ktalk.ru", r.Subdomain)
+}
+
+// conferenceIDOrRoom returns ConferenceID if set, falling back to RoomID.
+// ALWAYS prefer ConferenceID in production — it is the room= parameter in the
+// XMPP WebSocket URL (confirmed from DevTools: the full "<roomName>_<hex>" value).
+func (r RoomConfig) conferenceIDOrRoom() string {
+	if r.ConferenceID != "" {
+		return r.ConferenceID
+	}
+	return r.RoomID
+}
+
 // WSSUrl returns the WebSocket URL for the XMPP connection to this room.
+//
+// Confirmed URL format (DevTools 2026-05-19):
+//
+//	wss://<subdomain>.ktalk.ru/<roomName>/xmpp-websocket?room=<conferenceId>
+//
+// The path component is the short roomName (RoomID).
+// The room= query parameter is the full ConferenceID from GET /api/rooms/<id>.
 func (r RoomConfig) WSSUrl() string {
 	return fmt.Sprintf(
-		"wss://%s.ktalk.ru/xmpp-websocket?room=%s",
-		r.Subdomain, r.RoomID,
+		"wss://%s/%s/xmpp-websocket?room=%s",
+		r.Domain(), r.RoomID, r.conferenceIDOrRoom(),
 	)
+}
+
+// UnlockURL returns the _unlock keepalive URL for shard detection.
+//
+// Called every ~60 s. Response header x-jitsi-shard signals geo failover.
+func (r RoomConfig) UnlockURL() string {
+	return fmt.Sprintf(
+		"https://%s/%s/_unlock?room=%s",
+		r.Domain(), r.RoomID, r.conferenceIDOrRoom(),
+	)
+}
+
+// MetricsURL returns the URL for the per-60s connection metrics keepalive.
+//
+// POST /api/metrics/connection must be called every ~60 s to keep the
+// server-side session alive (confirmed from DevTools: fires every minute).
+func (r RoomConfig) MetricsURL() string {
+	return fmt.Sprintf("https://%s/api/metrics/connection", r.Domain())
 }
 
 // HTTPBase returns the base HTTP URL for this room's Jitsi instance.
 func (r RoomConfig) HTTPBase() string {
-	return fmt.Sprintf("https://%s.ktalk.ru", r.Subdomain)
+	return fmt.Sprintf("https://%s", r.Domain())
+}
+
+// RoomAPIURL returns the URL to fetch room info (GET /api/rooms/<roomId>).
+func (r RoomConfig) RoomAPIURL() string {
+	return fmt.Sprintf("https://%s/api/rooms/%s", r.Domain(), r.RoomID)
+}
+
+// MUCDomain returns the XMPP MUC domain for this shard.
+//
+// Confirmed format: conference.<roomName>.<subdomain>.ktalk.ru
+func (r RoomConfig) MUCDomain() string {
+	return fmt.Sprintf("conference.%s.%s", r.RoomID, r.Domain())
 }
 
 // JID returns the bare JID of the MUC room.
+//
+// Uses conferenceIDOrRoom as the local part so the server can route correctly.
 func (r RoomConfig) JID() string {
-	return fmt.Sprintf("%s@muc.meet.jitsi", r.RoomID)
+	return fmt.Sprintf("%s@%s", r.conferenceIDOrRoom(), r.MUCDomain())
 }
 
-// FocusJID returns the Jicofo focus JID.
+// FocusJID returns the Jicofo focus JID for this shard.
+//
+// Confirmed format: focus@<subdomain>.ktalk.ru/focus
 func (r RoomConfig) FocusJID() string {
-	return "focus@auth.meet.jitsi/focus"
+	return fmt.Sprintf("focus@%s/focus", r.Domain())
 }
 
 // CryptoConfig holds the ChaCha20-Poly1305 shared key.
@@ -236,4 +305,22 @@ func FetchSubscription(rawURL string, fetch func(string) (string, error)) (*Conf
 		return nil, SubscriptionMeta{}, err
 	}
 	return cfg, meta, nil
+}
+
+// LoadFile reads a YAML config file and returns a validated Config.
+// It also calls Defaults() to fill in any omitted optional fields.
+func LoadFile(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("config: read file %q: %w", path, err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("config: parse yaml %q: %w", path, err)
+	}
+	cfg.Defaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("config: invalid: %w", err)
+	}
+	return &cfg, nil
 }

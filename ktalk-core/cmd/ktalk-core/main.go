@@ -1,27 +1,20 @@
-// Command ktalk-core is the tunnel process for the ktalk private relay service.
+// ktalk-core — tunnel daemon.
 //
-// Usage (Creator side — runs on a VPS outside RU):
+// Usage:
 //
-//	ktalk-core -config /etc/ktalk-panel/clients/alice.yaml
+//	ktalk-core serve   -config /etc/xk/config.yaml          # Creator side (egress)
+//	ktalk-core connect -config /etc/xk/config.yaml          # Joiner side (proxy)
+//	ktalk-core version
 //
-// Usage (Joiner side — runs on the user's device):
-//
-//	ktalk-core -uri "ktalk://<base64>"
-//
-// The URI can also be loaded from a subscription URL:
-//
-//	ktalk-core -sub "https://panel.example.com/sub/alice/secret-token"
-//
-// All references to upstream projects have been removed from this binary.
+// Config file is YAML; see internal/config for field docs.
+// The API server always starts on cfg.API.ListenAddr (default 127.0.0.1:7070).
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -30,141 +23,202 @@ import (
 	"github.com/private/ktalk-core/internal/carrier"
 	"github.com/private/ktalk-core/internal/config"
 	"github.com/private/ktalk-core/internal/crypto"
+	"github.com/private/ktalk-core/internal/metrics"
 	"github.com/private/ktalk-core/internal/socks5"
 )
 
+const version = "0.1.0-sprint1"
+
 func main() {
-	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "ktalk-core: %v\n", err)
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(1)
+	}
+
+	switch os.Args[1] {
+	case "serve":
+		runMode("creator", os.Args[2:])
+	case "connect":
+		runMode("joiner", os.Args[2:])
+	case "version":
+		fmt.Println("ktalk-core", version)
+	default:
+		usage()
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	var (
-		flagConfig string
-		flagURI    string
-		flagSub    string
-		flagDebug  bool
-	)
-	flag.StringVar(&flagConfig, "config", "", "path to YAML config file (Creator mode)")
-	flag.StringVar(&flagURI, "uri", "", "ktalk:// URI config (Joiner mode)")
-	flag.StringVar(&flagSub, "sub", "", "subscription URL (fetches URI on startup)")
-	flag.BoolVar(&flagDebug, "debug", false, "enable verbose logging")
-	flag.Parse()
+func usage() {
+	fmt.Fprintf(os.Stderr, `ktalk-core %s
 
-	// Configure structured logger
+Commands:
+  serve    -config FILE   Start Creator (egress) side
+  connect  -config FILE   Start Joiner (SOCKS5 proxy) side
+  version                 Print version
+
+`, version)
+}
+
+// runMode starts the daemon in either creator or joiner mode.
+func runMode(mode string, args []string) {
+	fs := flag.NewFlagSet(mode, flag.ExitOnError)
+	cfgPath := fs.String("config", "", "Path to YAML config file (required)")
+	debug := fs.Bool("debug", false, "Enable debug logging")
+	metricsAddr := fs.String("metrics-addr", "127.0.0.1:7071", "Address for /health and /metrics (empty to disable)")
+	fs.Parse(args) //nolint:errcheck
+
+	if *cfgPath == "" {
+		fmt.Fprintln(os.Stderr, "error: -config is required")
+		os.Exit(1)
+	}
+
+	// Logging
 	logLevel := slog.LevelInfo
-	if flagDebug {
+	if *debug {
 		logLevel = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+	slog.SetDefault(log)
 
 	// Load config
-	cfg, err := loadConfig(flagConfig, flagURI, flagSub, log)
+	cfg, err := config.LoadFile(*cfgPath)
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		log.Error("load config", "err", err)
+		os.Exit(1)
 	}
-	cfg.Defaults()
-	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("config validation: %w", err)
+	cfg.Mode = config.Mode(mode)
+	if *debug {
+		cfg.Debug = true
 	}
 
-	// Initialise cipher
+	log.Info("starting", "mode", mode, "version", version,
+		"room", cfg.Room.RoomID, "subdomain", cfg.Room.Subdomain)
+
+	// Build cipher
 	cipher, err := crypto.NewFromHex(cfg.Crypto.Key)
 	if err != nil {
-		return fmt.Errorf("crypto init: %w", err)
+		log.Error("init cipher", "err", err)
+		os.Exit(1)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	// Context with graceful shutdown on SIGTERM / SIGINT
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
 
-	c := carrier.New(cfg, cipher, log.With("component", "carrier"))
-
-	// Joiner mode: start SOCKS5 proxy
-	if cfg.Mode == config.ModeJoiner {
-		socksCfg := socks5.Config{
-			ListenAddr: cfg.SOCKS5.ListenAddr,
-			Username:   cfg.SOCKS5.Username,
-			Password:   cfg.SOCKS5.Password,
-			Dial: func(dialCtx context.Context, network, addr string) (interface {
-				io.Reader
-				io.Writer
-				io.Closer
-			}, error) {
-				return c.OpenStream(dialCtx, addr)
-			},
-		}
-		_ = socksCfg
-		// SOCKS5 server construction — Dial signature reconciled when muxer.Stream
-		// implements net.Conn (Sprint 4 → Sprint 5 integration).
-		// For now, start a basic server without tunnel dial.
-		basicCfg := socks5.Config{
-			ListenAddr: cfg.SOCKS5.ListenAddr,
-			Username:   cfg.SOCKS5.Username,
-			Password:   cfg.SOCKS5.Password,
-		}
-		sock5 := socks5.New(basicCfg, log.With("component", "socks5"))
+	// Start metrics server if requested.
+	if *metricsAddr != "" {
+		metSrv := metrics.New(version, metrics.Global)
 		go func() {
-			if err := sock5.Run(ctx); err != nil && ctx.Err() == nil {
-				log.Error("socks5 server error", "err", err)
+			log.Info("metrics server starting", "addr", *metricsAddr)
+			if err := metSrv.Run(*metricsAddr); err != nil {
+				log.Warn("metrics server stopped", "err", err)
 			}
 		}()
-		log.Info("socks5 proxy started", "addr", cfg.SOCKS5.ListenAddr)
 	}
 
-	log.Info("ktalk-core starting",
-		"mode", cfg.Mode,
-		"room", cfg.Room.RoomID,
-		"subdomain", cfg.Room.Subdomain,
-	)
+	// Create carrier
+	c := carrier.New(cfg, cipher, log.With("component", "carrier"))
 
-	return c.Connect(ctx)
+	switch mode {
+	case "creator":
+		runCreator(ctx, cfg, c, log)
+	case "joiner":
+		runJoiner(ctx, cfg, c, log)
+	}
+
+	log.Info("shutdown complete")
 }
 
-func loadConfig(cfgPath, uri, subURL string, log *slog.Logger) (*config.Config, error) {
-	switch {
-	case subURL != "":
-		log.Info("fetching subscription", "url", subURL)
-		cfg, _, err := config.FetchSubscription(subURL, httpGet)
-		if err != nil {
-			return nil, fmt.Errorf("fetch subscription %s: %w", subURL, err)
-		}
-		return cfg, nil
+// runCreator starts the Creator side: carrier + API server.
+// The Creator receives SOCKS5 CONNECT requests from the Joiner over the DataChannel
+// and proxies them out to the real internet.
+func runCreator(ctx context.Context, cfg *config.Config, c *carrier.Carrier, log *slog.Logger) {
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.Connect(ctx) }()
 
-	case uri != "":
-		return config.DecodeURI(uri)
-
-	case cfgPath != "":
-		// TODO: implement YAML loading (requires gopkg.in/yaml.v3 in go.mod)
-		return nil, fmt.Errorf("YAML config loading not yet implemented — use -uri flag")
-
-	default:
-		// Try env variable
-		if envURI := os.Getenv("KTALK_URI"); envURI != "" {
-			return config.DecodeURI(envURI)
+	log.Info("creator running — waiting for joiner connections")
+	select {
+	case err := <-errCh:
+		if err != nil && ctx.Err() == nil {
+			log.Error("carrier error", "err", err)
 		}
-		if envSub := os.Getenv("KTALK_SUB"); envSub != "" {
-			cfg, _, err := config.FetchSubscription(envSub, httpGet)
-			return cfg, err
+	case <-ctx.Done():
+		log.Info("shutdown signal received")
+		c.Close()
+		select {
+		case <-errCh:
+		case <-time.After(5 * time.Second):
 		}
-		return nil, fmt.Errorf("one of -config, -uri, or -sub is required")
 	}
 }
 
-func httpGet(url string) (string, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return "", err
+// runJoiner starts the Joiner side: carrier + local SOCKS5 listener.
+// The Joiner exposes a SOCKS5 proxy on cfg.SOCKS5.ListenAddr that forwards
+// all connections through the DataChannel tunnel to the Creator.
+func runJoiner(ctx context.Context, cfg *config.Config, c *carrier.Carrier, log *slog.Logger) {
+	addr := cfg.SOCKS5.ListenAddr
+	if addr == "" {
+		addr = "127.0.0.1:1080"
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	if err != nil {
-		return "", err
+
+	// Wait until the DataChannel is open before starting the proxy listener.
+	dcReady := make(chan struct{})
+	c.SetOnDCOpen(func() {
+		select {
+		case dcReady <- struct{}{}:
+		default:
+		}
+	})
+
+	carrierErrCh := make(chan error, 1)
+	go func() { carrierErrCh <- c.Connect(ctx) }()
+
+	log.Info("joiner: waiting for datachannel to open…")
+	select {
+	case <-dcReady:
+		log.Info("datachannel ready — starting SOCKS5", "addr", addr)
+	case err := <-carrierErrCh:
+		if err != nil && ctx.Err() == nil {
+			log.Error("carrier failed before DC opened", "err", err)
+		}
+		return
+	case <-ctx.Done():
+		c.Close()
+		return
 	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
+
+	// Build SOCKS5 server using carrier.Dial as the tunnel DialFunc.
+	s5cfg := socks5.Config{
+		ListenAddr: addr,
+		Username:   cfg.SOCKS5.Username,
+		Password:   cfg.SOCKS5.Password,
+		Dial:       c.Dial,
 	}
-	return string(body), nil
+	srv := socks5.New(s5cfg, log.With("component", "socks5"))
+
+	s5ErrCh := make(chan error, 1)
+	go func() { s5ErrCh <- srv.Run(ctx) }()
+
+	log.Info("joiner ready", "socks5", addr)
+
+	select {
+	case err := <-carrierErrCh:
+		if err != nil && ctx.Err() == nil {
+			log.Error("carrier error", "err", err)
+		}
+		srv.CloseAll()
+	case err := <-s5ErrCh:
+		if err != nil && ctx.Err() == nil {
+			log.Error("socks5 error", "err", err)
+		}
+		c.Close()
+	case <-ctx.Done():
+		log.Info("shutdown signal")
+		c.Close()
+		srv.CloseAll()
+		select {
+		case <-carrierErrCh:
+		case <-time.After(5 * time.Second):
+		}
+	}
 }

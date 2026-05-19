@@ -1,0 +1,559 @@
+openapi: "3.1.0"
+info:
+  title: "ktalk-panel API"
+  version: "1.0.0"
+  description: |
+    Admin panel REST API for managing WebRTC/XMPP tunnel clients.
+    All endpoints (except /health and POST /api/auth/login) require
+    a session token in the Authorization header.
+  contact:
+    url: "https://github.com/cwash797-cmd/Project-XK"
+
+servers:
+  - url: "http://localhost:8888"
+    description: "Local dev"
+  - url: "https://{host}"
+    description: "Production"
+    variables:
+      host:
+        default: "your-domain.example.com"
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: "Session token returned by POST /api/auth/login"
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: "unauthorized"
+
+    HealthResponse:
+      type: object
+      required: [status, uptime]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          example: "ok"
+        uptime:
+          type: string
+          description: "Human-readable uptime duration"
+          example: "2h15m30s"
+
+    LoginRequest:
+      type: object
+      required: [password]
+      properties:
+        password:
+          type: string
+          format: password
+          example: "supersecret"
+
+    LoginResponse:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: "Session token (opaque, pass as Bearer)"
+          example: "eyJhbGc..."
+
+    SetupRequest:
+      type: object
+      required: [password]
+      properties:
+        password:
+          type: string
+          format: password
+          minLength: 8
+          example: "mysecretpassword"
+
+    ClientStatus:
+      type: string
+      enum: [stopped, connecting, active, error, rotating]
+      description: |
+        - stopped: not running
+        - connecting: XMPP/ICE handshake in progress
+        - active: DataChannel open, traffic flowing
+        - error: last start failed
+        - rotating: E2E key rotation in progress
+
+    Client:
+      type: object
+      required: [id, label, room_url, status, created_at]
+      properties:
+        id:
+          type: string
+          description: "Unique client ID (nanoid)"
+          example: "abc123def456"
+        label:
+          type: string
+          description: "Human-readable label"
+          example: "prod-tunnel-1"
+        room_url:
+          type: string
+          format: uri
+          description: "ktalk.ru room URL"
+          example: "https://ktalk.ru/cb140blkff7i"
+        status:
+          $ref: "#/components/schemas/ClientStatus"
+        socks5_port:
+          type: integer
+          description: "Local SOCKS5 port (0 = not started)"
+          example: 1080
+        bytes_in:
+          type: integer
+          format: int64
+          description: "Total bytes received through tunnel"
+          example: 104857600
+        bytes_out:
+          type: integer
+          format: int64
+          description: "Total bytes sent through tunnel"
+          example: 52428800
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-05-19T10:00:00Z"
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-05-19T10:01:00Z"
+        last_key_rotation:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Timestamp of last successful E2E key rotation"
+          example: "2026-05-19T10:00:00Z"
+        error_message:
+          type: string
+          nullable: true
+          description: "Last error message (if status=error)"
+          example: "ICE failed after 5 retries"
+        room_id:
+          type: string
+          description: "Extracted room ID from room_url"
+          example: "cb140blkff7i"
+
+    CreateClientRequest:
+      type: object
+      required: [room_url]
+      properties:
+        room_url:
+          type: string
+          format: uri
+          description: "ktalk.ru room URL"
+          example: "https://ktalk.ru/cb140blkff7i"
+        label:
+          type: string
+          description: "Human-readable label (auto-generated if omitted)"
+          example: "prod-tunnel-1"
+        socks5_port:
+          type: integer
+          description: "Preferred SOCKS5 port (0 = auto-assign)"
+          example: 1080
+        autostart:
+          type: boolean
+          description: "Start tunnel immediately after creation"
+          default: false
+
+    CreateClientResponse:
+      type: object
+      required: [client, key]
+      properties:
+        client:
+          $ref: "#/components/schemas/Client"
+        key:
+          type: string
+          description: "Initial E2E encryption key (hex, 32 bytes). Store securely — not shown again."
+          example: "deadbeefcafe0102030405060708090a0b0c0d0e0f101112131415161718191a"
+
+    RotateKeyResponse:
+      type: object
+      required: [key, rotated_at]
+      properties:
+        key:
+          type: string
+          description: "New E2E encryption key (hex, 32 bytes)"
+          example: "a1b2c3d4e5f6..."
+        rotated_at:
+          type: string
+          format: date-time
+          example: "2026-05-19T10:00:00Z"
+
+    Stats:
+      type: object
+      required: [total_clients, active_clients, total_bytes_in, total_bytes_out, uptime]
+      properties:
+        total_clients:
+          type: integer
+          example: 5
+        active_clients:
+          type: integer
+          example: 3
+        total_bytes_in:
+          type: integer
+          format: int64
+          example: 1073741824
+        total_bytes_out:
+          type: integer
+          format: int64
+          example: 536870912
+        uptime:
+          type: string
+          example: "2h15m30s"
+        key_rotations_total:
+          type: integer
+          format: int64
+          example: 42
+
+    SSEEvent:
+      type: object
+      description: "Server-Sent Event payload (JSON)"
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [state, log, ping]
+        data:
+          description: |
+            - type=state: Client object (partial update)
+            - type=log: string (log line)
+            - type=ping: ISO 8601 timestamp string
+          oneOf:
+            - $ref: "#/components/schemas/Client"
+            - type: string
+
+paths:
+  /health:
+    get:
+      summary: "Health check"
+      description: "Returns service health. No auth required."
+      security: []
+      tags: [System]
+      responses:
+        "200":
+          description: "Service is healthy"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /metrics:
+    get:
+      summary: "Prometheus metrics"
+      description: "Returns metrics in Prometheus text format. No auth required."
+      security: []
+      tags: [System]
+      responses:
+        "200":
+          description: "Prometheus text format"
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/auth/login:
+    post:
+      summary: "Authenticate"
+      description: "Exchange admin password for a session token."
+      security: []
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: "Authentication successful"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          description: "Invalid password"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/auth/logout:
+    post:
+      summary: "Invalidate session"
+      tags: [Auth]
+      responses:
+        "204":
+          description: "Session invalidated"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/setup:
+    post:
+      summary: "Initial setup"
+      description: "Set admin password on first run. Only available if no password is set."
+      security: []
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetupRequest"
+      responses:
+        "200":
+          description: "Setup complete"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "409":
+          description: "Already configured"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/stats:
+    get:
+      summary: "Panel statistics"
+      tags: [Stats]
+      responses:
+        "200":
+          description: "Global statistics"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Stats"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/events:
+    get:
+      summary: "SSE event stream"
+      description: |
+        Server-Sent Events stream for real-time dashboard updates.
+        
+        Event types:
+        - `state`: Client state update (JSON: Client object)
+        - `log`: Log line (string)
+        - `ping`: Keepalive (ISO timestamp)
+        
+        The stream sends an initial `state` event for each client on connect.
+      tags: [Events]
+      responses:
+        "200":
+          description: "SSE stream (text/event-stream)"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: "SSE formatted events"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/clients:
+    get:
+      summary: "List all clients"
+      tags: [Clients]
+      responses:
+        "200":
+          description: "List of clients"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Client"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      summary: "Create a new tunnel client"
+      tags: [Clients]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateClientRequest"
+      responses:
+        "201":
+          description: "Client created"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateClientResponse"
+        "400":
+          description: "Invalid request"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/clients/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        example: "abc123def456"
+
+    get:
+      summary: "Get client by ID"
+      tags: [Clients]
+      responses:
+        "200":
+          description: "Client details"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Client"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      summary: "Delete client"
+      description: "Stops the tunnel (if running) and removes the client."
+      tags: [Clients]
+      responses:
+        "204":
+          description: "Client deleted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/clients/{id}/start:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: "Start tunnel"
+      description: "Initiates XMPP connection and WebRTC handshake."
+      tags: [Clients]
+      responses:
+        "202":
+          description: "Start initiated (status transitions to 'connecting')"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Client"
+        "400":
+          description: "Already running"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/clients/{id}/stop:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: "Stop tunnel"
+      description: "Gracefully terminates the Jingle session and closes DataChannel."
+      tags: [Clients]
+      responses:
+        "202":
+          description: "Stop initiated"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Client"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/clients/{id}/rotate-key:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: "Rotate E2E encryption key"
+      description: |
+        Generates a new 256-bit ChaCha20 key, sends CmdKeyRotate frame
+        sealed with the current key, then atomically swaps to the new key.
+        
+        Both directions (initiator send + responder receive) swap atomically.
+        The new key is returned in the response — store it securely.
+      tags: [Clients]
+      responses:
+        "200":
+          description: "Key rotated successfully"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RotateKeyResponse"
+        "400":
+          description: "Tunnel not active"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  components:
+    responses:
+      Unauthorized:
+        description: "Missing or invalid Authorization header"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Error"
+            example:
+              error: "unauthorized"
+      NotFound:
+        description: "Client not found"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Error"
+            example:
+              error: "client not found"
+
+tags:
+  - name: System
+    description: "Health and metrics endpoints"
+  - name: Auth
+    description: "Authentication"
+  - name: Stats
+    description: "Aggregate statistics"
+  - name: Events
+    description: "Real-time SSE event stream"
+  - name: Clients
+    description: "Tunnel client management"

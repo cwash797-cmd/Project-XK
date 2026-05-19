@@ -25,9 +25,9 @@ const (
 
 // Cipher wraps a ChaCha20-Poly1305 AEAD with per-direction sequence counters.
 type Cipher struct {
-	aead     cipher.AEAD
-	sendSeq  atomic.Uint64
-	recvSeq  atomic.Uint64
+	aead    cipher.AEAD
+	sendSeq atomic.Uint64
+	recvSeq atomic.Uint64
 }
 
 // New creates a Cipher from a 32-byte raw key.

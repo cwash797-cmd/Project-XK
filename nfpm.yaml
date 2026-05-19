@@ -1,0 +1,70 @@
+# nfpm.yaml — package spec for .deb and .rpm
+# Used by: nfpm package --config nfpm.yaml --packager deb --target dist/
+#          nfpm package --config nfpm.yaml --packager rpm --target dist/
+#
+# Install nfpm: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+# Docs: https://nfpm.goreleaser.com/
+
+name: "project-xk"
+arch: "amd64"        # overridden at runtime: GOARCH=arm64 → arch: arm64
+platform: "linux"
+version: "${XK_VERSION}"   # set via env: XK_VERSION=v1.0.0 nfpm package ...
+maintainer: "cwash797-cmd <noreply@github.com>"
+description: |
+  Project-XK — WebRTC-over-XMPP tunnel with admin panel.
+  Includes ktalk-core (tunnel daemon) and ktalk-panel (admin panel).
+vendor: "Project-XK"
+homepage: "https://github.com/cwash797-cmd/Project-XK"
+license: "MIT"
+section: "net"
+priority: "optional"
+
+depends:
+  - "ca-certificates"
+
+recommends:
+  - "caddy"
+
+contents:
+  # Binaries
+  - src: dist/ktalk-core-linux-amd64
+    dst: /usr/local/bin/ktalk-core
+    file_info:
+      mode: 0755
+
+  - src: dist/ktalk-panel-linux-amd64
+    dst: /usr/local/bin/ktalk-panel
+    file_info:
+      mode: 0755
+
+  # Default config (only written if not present — handled by postinstall)
+  - src: packaging/config.json.default
+    dst: /etc/ktalk-panel/config.json.default
+    file_info:
+      mode: 0640
+
+  # Systemd unit
+  - src: packaging/ktalk-panel.service
+    dst: /lib/systemd/system/ktalk-panel.service
+    file_info:
+      mode: 0644
+
+  # Directories
+  - dst: /etc/ktalk-panel
+    type: dir
+    file_info:
+      mode: 0750
+      owner: xk
+      group: xk
+
+  - dst: /var/lib/ktalk-panel
+    type: dir
+    file_info:
+      mode: 0750
+      owner: xk
+      group: xk
+
+scripts:
+  preinstall:  packaging/preinstall.sh
+  postinstall: packaging/postinstall.sh
+  preremove:   packaging/preremove.sh

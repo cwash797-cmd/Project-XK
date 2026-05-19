@@ -9,6 +9,7 @@
 package xmpp
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/xml"
@@ -17,6 +18,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"net/http/cookiejar"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,33 +28,39 @@ import (
 )
 
 const (
-	xmppNS         = "jabber:client"
-	saslNS         = "urn:ietf:params:xml:ns:xmpp-sasl"
-	bindNS         = "urn:ietf:params:xml:ns:xmpp-bind"
-	sessionNS      = "urn:ietf:params:xml:ns:xmpp-session"
-	smNS           = "urn:xmpp:sm:3"
-	mucNS          = "http://jabber.org/protocol/muc"
-	mucUserNS      = "http://jabber.org/protocol/muc#user"
-	discoNS        = "http://jabber.org/protocol/disco#info"
-	extDiscoNS     = "urn:xmpp:extdisco:2"
-	jingleNS       = "urn:xmpp:jingle:1"
-	jitsiNS        = "http://jitsi.org/jitmeet"
-	capNS          = "http://jabber.org/protocol/caps"
+	xmppNS     = "jabber:client"
+	saslNS     = "urn:ietf:params:xml:ns:xmpp-sasl"
+	bindNS     = "urn:ietf:params:xml:ns:xmpp-bind"
+	sessionNS  = "urn:ietf:params:xml:ns:xmpp-session"
+	smNS       = "urn:xmpp:sm:3"
+	mucNS      = "http://jabber.org/protocol/muc"
+	mucUserNS  = "http://jabber.org/protocol/muc#user"
+	discoNS    = "http://jabber.org/protocol/disco#info"
+	extDiscoNS = "urn:xmpp:extdisco:2"
+	jingleNS   = "urn:xmpp:jingle:1"
+	jitsiNS    = "http://jitsi.org/jitmeet"
+	capNS      = "http://jabber.org/protocol/caps"
 
 	reconnectDelay    = 3 * time.Second
 	reconnectMaxDelay = 60 * time.Second
 	smAckInterval     = 10 * time.Second
+
+	// metricsInterval is how often we POST /api/metrics/connection.
+	// Confirmed from DevTools: the browser sends this every ~60 s.
+	metricsInterval = 55 * time.Second
+	// unlockInterval is how often we GET /_unlock for shard detection.
+	unlockInterval = 55 * time.Second
 )
 
 // STUNServer holds a STUN/TURN credential from extdisco.
 type STUNServer struct {
-	Host       string
-	Port       int
-	Type       string // "stun" or "turn"
-	Transport  string // "udp" or "tcp"
-	Username   string
-	Password   string
-	Expiry     time.Time
+	Host      string
+	Port      int
+	Type      string // "stun" or "turn"
+	Transport string // "udp" or "tcp"
+	Username  string
+	Password  string
+	Expiry    time.Time
 }
 
 // JingleSession describes an incoming or outgoing Jingle negotiation.
@@ -80,13 +88,20 @@ type Callbacks struct {
 
 // Client is a stateful XMPP-over-WebSocket connection to a Kontour Talk room.
 type Client struct {
-	wssURL    string
-	roomJID   string   // e.g. "roomid@muc.meet.jitsi"
-	focusJID  string   // e.g. "focus@auth.meet.jitsi/focus"
-	httpBase  string   // e.g. "https://subdomain.ktalk.ru"
-	nickname  string
-	callbacks Callbacks
-	log       *slog.Logger
+	wssURL     string
+	roomJID    string // e.g. "conferenceId@conference.roomName.shard.ktalk.ru"
+	focusJID   string // e.g. "focus@shard.ktalk.ru/focus"
+	httpBase   string // e.g. "https://shard.ktalk.ru"
+	metricsURL string // e.g. "https://shard.ktalk.ru/api/metrics/connection"
+	unlockURL  string // e.g. "https://shard.ktalk.ru/roomName/_unlock?room=conferenceId"
+	nickname   string
+	callbacks  Callbacks
+	log        *slog.Logger
+
+	// httpClient carries the cookie jar so ngtoken / kontur_ngtoken are sent
+	// automatically on all HTTP keepalive requests (metrics, _unlock).
+	httpClient   *http.Client
+	currentShard string // last value of x-jitsi-shard from _unlock
 
 	mu        sync.Mutex
 	conn      *websocket.Conn
@@ -95,20 +110,48 @@ type Client struct {
 	smH       uint32 // handled stanza count (for SM acks)
 	smResume  string // SM previd for resume
 
-	iqSeq    atomic.Uint64
-	closed   atomic.Bool
+	iqSeq  atomic.Uint64
+	closed atomic.Bool
 }
 
 // NewClient creates a new XMPP client. Call Connect to start the session.
-func NewClient(wssURL, roomJID, focusJID, httpBase, nickname string, cb Callbacks, log *slog.Logger) *Client {
+//
+// Parameters:
+//   - wssURL: full WebSocket URL, e.g.
+//     "wss://ilte0310.ktalk.ru/cb140blkff7i/xmpp-websocket?room=cb140blkff7i_3074b..."
+//   - roomJID: MUC bare JID, e.g.
+//     "cb140blkff7i_3074b...@conference.cb140blkff7i.ilte0310.ktalk.ru"
+//   - focusJID: Jicofo JID, e.g. "focus@ilte0310.ktalk.ru/focus"
+//   - httpBase: base URL, e.g. "https://ilte0310.ktalk.ru"
+//   - metricsURL: POST endpoint for connection keepalive, e.g.
+//     "https://ilte0310.ktalk.ru/api/metrics/connection"
+//   - unlockURL: GET endpoint for shard detection, e.g.
+//     "https://ilte0310.ktalk.ru/cb140blkff7i/_unlock?room=cb140blkff7i_3074b..."
+//   - cookieJar: cookie jar pre-populated with ngtoken / kontur_ngtoken cookies.
+//     If nil, a new empty jar is created (anonymous session, relies on server Set-Cookie).
+func NewClient(
+	wssURL, roomJID, focusJID, httpBase, metricsURL, unlockURL, nickname string,
+	cookieJar http.CookieJar,
+	cb Callbacks,
+	log *slog.Logger,
+) *Client {
+	if cookieJar == nil {
+		cookieJar, _ = cookiejar.New(nil)
+	}
 	return &Client{
-		wssURL:   wssURL,
-		roomJID:  roomJID,
-		focusJID: focusJID,
-		httpBase: httpBase,
-		nickname: nickname,
-		callbacks: cb,
-		log:      log,
+		wssURL:     wssURL,
+		roomJID:    roomJID,
+		focusJID:   focusJID,
+		httpBase:   httpBase,
+		metricsURL: metricsURL,
+		unlockURL:  unlockURL,
+		nickname:   nickname,
+		callbacks:  cb,
+		log:        log,
+		httpClient: &http.Client{
+			Jar:     cookieJar,
+			Timeout: 15 * time.Second,
+		},
 	}
 }
 
@@ -208,10 +251,102 @@ func (c *Client) runOnce(ctx context.Context) error {
 	return c.readLoop(ctx, conn)
 }
 
+// startKeepalives launches background goroutines for HTTP keepalives.
+// They run until ctx is cancelled. Call after a successful handshake.
+func (c *Client) startKeepalives(ctx context.Context) {
+	go c.metricsKeepalive(ctx)
+	go c.shardWatcher(ctx)
+}
+
+// metricsKeepalive POSTs /api/metrics/connection every ~55 s.
+// This is the primary server-side session keepalive (confirmed from DevTools).
+func (c *Client) metricsKeepalive(ctx context.Context) {
+	if c.metricsURL == "" {
+		return
+	}
+	ticker := time.NewTicker(metricsInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.postMetrics(ctx)
+		}
+	}
+}
+
+func (c *Client) postMetrics(ctx context.Context) {
+	// Minimal payload — enough to signal liveness.
+	// TODO: populate with actual WebRTC stats when available.
+	payload := []byte(`{"connectionType":"datachannel"}`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.metricsURL, bytes.NewReader(payload))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		c.log.Debug("metrics keepalive failed", "err", err)
+		return
+	}
+	resp.Body.Close()
+	c.log.Debug("metrics keepalive", "status", resp.StatusCode)
+}
+
+// shardWatcher GETs /_unlock every ~55 s and triggers reconnect on shard change.
+func (c *Client) shardWatcher(ctx context.Context) {
+	if c.unlockURL == "" {
+		return
+	}
+	ticker := time.NewTicker(unlockInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.checkShard(ctx)
+		}
+	}
+}
+
+func (c *Client) checkShard(ctx context.Context) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.unlockURL, nil)
+	if err != nil {
+		return
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		c.log.Debug("shard check failed", "err", err)
+		return
+	}
+	resp.Body.Close()
+	shard := resp.Header.Get("x-jitsi-shard")
+	if shard == "" {
+		return
+	}
+	c.mu.Lock()
+	prev := c.currentShard
+	c.currentShard = shard
+	c.mu.Unlock()
+	if prev != "" && shard != prev {
+		c.log.Warn("jitsi shard changed, triggering reconnect", "old", prev, "new", shard)
+		// Close current WebSocket to force runOnce to exit and reconnect.
+		c.mu.Lock()
+		if c.conn != nil {
+			c.conn.Close()
+		}
+		c.mu.Unlock()
+	}
+}
+
 func (c *Client) dial(ctx context.Context) (*websocket.Conn, error) {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 20 * time.Second,
 		Subprotocols:     []string{"xmpp"},
+		// Forward cookie jar so the WebSocket upgrade carries ngtoken / kontur_ngtoken.
+		Jar: c.httpClient.Jar,
 	}
 	headers := http.Header{}
 	headers.Set("Origin", c.httpBase)
@@ -222,11 +357,31 @@ func (c *Client) dial(ctx context.Context) (*websocket.Conn, error) {
 	return conn, nil
 }
 
+// xmppDomain extracts the XMPP server domain from focusJID.
+// focusJID has the form "focus@<domain>/focus" → returns "<domain>".
+func (c *Client) xmppDomain() string {
+	s := c.focusJID
+	// Strip "focus@" prefix
+	if i := strings.Index(s, "@"); i >= 0 {
+		s = s[i+1:]
+	}
+	// Strip "/focus" suffix
+	if i := strings.Index(s, "/"); i >= 0 {
+		s = s[:i]
+	}
+	if s == "" {
+		return "meet.jitsi" // safe fallback
+	}
+	return s
+}
+
 func (c *Client) handshake(ctx context.Context, conn *websocket.Conn) error {
+	domain := c.xmppDomain()
+
 	// 1. Open stream
 	if err := c.writeRaw(conn, fmt.Sprintf(
-		`<?xml version="1.0"?><stream:stream to="meet.jitsi" version="1.0" xml:lang="en" xmlns=%q xmlns:stream="http://etherx.jabber.org/streams">`,
-		xmppNS,
+		`<?xml version="1.0"?><stream:stream to=%q version="1.0" xml:lang="en" xmlns=%q xmlns:stream="http://etherx.jabber.org/streams">`,
+		domain, xmppNS,
 	)); err != nil {
 		return err
 	}
@@ -249,8 +404,8 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn) error {
 
 	// 4. Reopen stream
 	if err := c.writeRaw(conn, fmt.Sprintf(
-		`<stream:stream to="meet.jitsi" version="1.0" xml:lang="en" xmlns=%q xmlns:stream="http://etherx.jabber.org/streams">`,
-		xmppNS,
+		`<stream:stream to=%q version="1.0" xml:lang="en" xmlns=%q xmlns:stream="http://etherx.jabber.org/streams">`,
+		domain, xmppNS,
 	)); err != nil {
 		return err
 	}
@@ -292,8 +447,8 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn) error {
 	// 8. extdisco — get STUN/TURN credentials
 	discoID := c.nextIQID()
 	if err := c.writeRaw(conn, fmt.Sprintf(
-		`<iq type="get" to="meet.jitsi" id=%q xmlns=%q><services xmlns=%q/></iq>`,
-		discoID, xmppNS, extDiscoNS,
+		`<iq type="get" to=%q id=%q xmlns=%q><services xmlns=%q/></iq>`,
+		domain, discoID, xmppNS, extDiscoNS,
 	)); err != nil {
 		return err
 	}
@@ -323,6 +478,9 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn) error {
 func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	smTicker := time.NewTicker(smAckInterval)
 	defer smTicker.Stop()
+
+	// Start HTTP keepalives once XMPP handshake is complete.
+	c.startKeepalives(ctx)
 
 	done := make(chan error, 1)
 	go func() {

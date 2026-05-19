@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	maxLogLines = 500
+	maxLogLines  = 500
 	restartDelay = 3 * time.Second
 	maxRestarts  = 5
 )
@@ -316,12 +316,20 @@ func rawBase64URL(b []byte) string {
 	for i := 0; i < len(b); i += 3 {
 		b0 := b[i]
 		var b1, b2 byte
-		if i+1 < len(b) { b1 = b[i+1] }
-		if i+2 < len(b) { b2 = b[i+2] }
+		if i+1 < len(b) {
+			b1 = b[i+1]
+		}
+		if i+2 < len(b) {
+			b2 = b[i+2]
+		}
 		out = append(out, alpha[b0>>2])
 		out = append(out, alpha[(b0&3)<<4|b1>>4])
-		if i+1 < len(b) { out = append(out, alpha[(b1&0xf)<<2|b2>>6]) }
-		if i+2 < len(b) { out = append(out, alpha[b2&0x3f]) }
+		if i+1 < len(b) {
+			out = append(out, alpha[(b1&0xf)<<2|b2>>6])
+		}
+		if i+2 < len(b) {
+			out = append(out, alpha[b2&0x3f])
+		}
 	}
 	return string(out)
 }

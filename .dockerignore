@@ -1,0 +1,24 @@
+# Build artifacts
+dist/
+ktalk-panel/web/node_modules/
+ktalk-panel/web/.svelte-kit/
+ktalk-panel/web/dist/
+
+# Go caches (rebuild inside Docker)
+ktalk-core/vendor/
+ktalk-panel/vendor/
+
+# Git and CI metadata
+.git/
+.github/
+*.md
+
+# Local dev configs and secrets
+*.env
+*.local
+config.json
+/etc/
+
+# OS noise
+.DS_Store
+Thumbs.db
