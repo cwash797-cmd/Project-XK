@@ -23,8 +23,7 @@ func newTestCipher(t *testing.T) *Cipher {
 func TestSealOpen_RoundTrip(t *testing.T) {
 	c := newTestCipher(t)
 	plain := []byte("hello, DataChannel")
-	ct := c.Seal(plain)
-	seq := c.NextRecvSeq()
+	ct, seq := c.Seal(plain)
 	got, err := c.Open(seq, ct)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -41,13 +40,17 @@ func TestSealOpen_MultipleFrames(t *testing.T) {
 		[]byte("frame 1 — longer payload here"),
 		[]byte("frame 2"),
 	}
-	var ciphertexts [][]byte
-	for _, m := range messages {
-		ciphertexts = append(ciphertexts, c.Seal(m))
+	type sealed struct {
+		ct  []byte
+		seq uint64
 	}
-	for i, ct := range ciphertexts {
-		seq := c.NextRecvSeq()
-		got, err := c.Open(seq, ct)
+	var frames []sealed
+	for _, m := range messages {
+		ct, seq := c.Seal(m)
+		frames = append(frames, sealed{ct, seq})
+	}
+	for i, f := range frames {
+		got, err := c.Open(f.seq, f.ct)
 		if err != nil {
 			t.Fatalf("Open[%d]: %v", i, err)
 		}
@@ -59,9 +62,9 @@ func TestSealOpen_MultipleFrames(t *testing.T) {
 
 func TestOpen_TamperedCiphertext(t *testing.T) {
 	c := newTestCipher(t)
-	ct := c.Seal([]byte("secret"))
+	ct, seq := c.Seal([]byte("secret"))
 	ct[0] ^= 0xFF // tamper
-	if _, err := c.Open(0, ct); err == nil {
+	if _, err := c.Open(seq, ct); err == nil {
 		t.Fatal("expected error on tampered ciphertext")
 	}
 }

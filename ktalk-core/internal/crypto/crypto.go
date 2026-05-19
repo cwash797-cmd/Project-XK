@@ -53,11 +53,13 @@ func NewFromHex(hexKey string) (*Cipher, error) {
 
 // Seal encrypts and authenticates plaintext.
 // The sequence number is incremented atomically before sealing.
-// Returns ciphertext that includes the AEAD authentication tag.
-func (c *Cipher) Seal(plaintext []byte) []byte {
-	seq := c.sendSeq.Add(1) - 1
+// Returns the ciphertext (with AEAD tag) and the sequence number used,
+// which must be stored in the frame header so the receiver can derive the nonce.
+func (c *Cipher) Seal(plaintext []byte) (ciphertext []byte, seq uint64) {
+	seq = c.sendSeq.Add(1) - 1
 	nonce := seqToNonce(seq)
-	return c.aead.Seal(nil, nonce[:], plaintext, nil)
+	ciphertext = c.aead.Seal(nil, nonce[:], plaintext, nil)
+	return
 }
 
 // Open decrypts and verifies ciphertext sealed with Seal.
