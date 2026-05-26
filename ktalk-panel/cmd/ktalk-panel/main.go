@@ -31,10 +31,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/private/ktalk-panel/internal/auth"
-	"github.com/private/ktalk-panel/internal/config"
-	"github.com/private/ktalk-panel/internal/sse"
-	"github.com/private/ktalk-panel/internal/supervisor"
+	qrcode "github.com/skip2/go-qrcode"
+
+	"github.com/cwash797-cmd/Project-XK/ktalk-panel/internal/auth"
+	"github.com/cwash797-cmd/Project-XK/ktalk-panel/internal/config"
+	"github.com/cwash797-cmd/Project-XK/ktalk-panel/internal/sse"
+	"github.com/cwash797-cmd/Project-XK/ktalk-panel/internal/supervisor"
 )
 
 //go:embed web/dist
@@ -178,6 +180,8 @@ func buildRouter(store *config.Store, sup *supervisor.Supervisor, broker *sse.Br
 
 	// Subscription endpoint (public but secret-token gated)
 	mux.HandleFunc("/sub/", handleSubscription(store))
+	// QR code endpoint for subscription URL
+	mux.HandleFunc("/qr/", handleQRSub(store))
 
 	// Health + metrics (unauthenticated — safe for internal monitoring)
 	startTime := time.Now()
@@ -353,7 +357,7 @@ func handleClients(store *config.Store, sup *supervisor.Supervisor, log *slog.Lo
 					log.Warn("auto-start failed for new client", "id", client.ID, "err", err)
 				}
 			}
-			writeJSON(w, http.StatusCreated, client)
+			writeJSON(w, http.StatusCreated, clientWithSubURL(client, r.Host))
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -426,13 +430,16 @@ func handleClient(store *config.Store, sup *supervisor.Supervisor, log *slog.Log
 			}
 			w.WriteHeader(http.StatusNoContent)
 
+		case action == "qr" && r.Method == http.MethodGet:
+			handleQR(store)(w, r)
+
 		case action == "" && r.Method == http.MethodGet:
 			c, ok := store.GetClient(id)
 			if !ok {
 				http.NotFound(w, r)
 				return
 			}
-			writeJSON(w, http.StatusOK, c)
+			writeJSON(w, http.StatusOK, clientWithSubURL(c, r.Host))
 
 		default:
 			http.Error(w, "method not allowed or unknown action", http.StatusMethodNotAllowed)
@@ -459,6 +466,37 @@ func handleLogs(sup *supervisor.Supervisor) http.HandlerFunc {
 	}
 }
 
+// clientResponse is the JSON shape returned by POST /api/clients and GET /api/clients/:id.
+// It augments config.Client with the computed sub_url field.
+type clientResponse struct {
+	config.Client
+	SubURL     string `json:"sub_url"`
+	SOCKS5Addr string `json:"socks5_addr"`
+}
+
+// clientWithSubURL wraps a Client with its computed subscription URL.
+func clientWithSubURL(c config.Client, host string) clientResponse {
+	socksPort := c.SOCKS5Port
+	if socksPort == 0 {
+		socksPort = 1080 // sensible default for display
+	}
+	return clientResponse{
+		Client:     c,
+		SubURL:     buildSubURL(c, host),
+		SOCKS5Addr: fmt.Sprintf("127.0.0.1:%d", socksPort),
+	}
+}
+
+// buildSubURL returns the HTTPS subscription URL for a client.
+func buildSubURL(c config.Client, host string) string {
+	scheme := "https"
+	// Use http for localhost/plain-IP dev setups
+	if strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.") {
+		scheme = "http"
+	}
+	return fmt.Sprintf("%s://%s/sub/%s/%s", scheme, host, c.ID, c.SubToken)
+}
+
 // --- subscription endpoint ---
 
 func handleSubscription(store *config.Store) http.HandlerFunc {
@@ -480,7 +518,27 @@ func handleSubscription(store *config.Store) http.HandlerFunc {
 		status := c.Quota.Status()
 		usedGB := float64(c.Quota.UsedBytes) / (1 << 30)
 
-		// Build ktalk:// URI (Joiner mode)
+		socksPort := c.SOCKS5Port
+		if socksPort == 0 {
+			socksPort = 1080
+		}
+		socksAddr := fmt.Sprintf("127.0.0.1:%d", socksPort)
+
+		// P0-2: dual-format response — JSON for kvas-client, text/plain legacy for old clients
+		accept := r.Header.Get("Accept")
+		if strings.Contains(accept, "application/json") {
+			writeJSON(w, http.StatusOK, map[string]string{
+				"sub_url":     buildSubURL(c, r.Host),
+				"room_url":    fmt.Sprintf("https://%s.ktalk.ru/%s", c.Room.Subdomain, c.Room.RoomID),
+				"shared_key":  c.SharedKey,
+				"socks5_addr": socksAddr,
+				"label":       c.Name,
+				"status":      status,
+			})
+			return
+		}
+
+		// Legacy text/plain — ktalk:// URI for old clients / manual use
 		uri := buildJoinerURI(c)
 
 		var sb strings.Builder
@@ -495,6 +553,64 @@ func handleSubscription(store *config.Store) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(sb.String()))
+	}
+}
+
+// handleQR serves a QR code PNG for the subscription URL of a client.
+// Route: GET /api/clients/:id/qr  (auth-protected, handled by handleClient)
+func handleQR(store *config.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// Path: /api/clients/<id>/qr
+		path := strings.TrimPrefix(r.URL.Path, "/api/clients/")
+		id := strings.TrimSuffix(path, "/qr")
+		id = strings.TrimSuffix(id, "/")
+
+		c, ok := store.GetClient(id)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+
+		subURL := buildSubURL(c, r.Host)
+		png, err := qrcode.Encode(subURL, qrcode.Medium, 256)
+		if err != nil {
+			http.Error(w, "qr encode error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Write(png)
+	}
+}
+
+// handleQRSub serves a QR code for the subscription URL at /qr/:id/:token.
+// This is publicly accessible (no auth) because the token acts as the secret.
+func handleQRSub(store *config.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/qr/"), "/")
+		if len(parts) != 2 {
+			http.NotFound(w, r)
+			return
+		}
+		clientID, token := parts[0], parts[1]
+		c, ok := store.GetClient(clientID)
+		if !ok || c.SubToken != token {
+			http.NotFound(w, r)
+			return
+		}
+		subURL := buildSubURL(c, r.Host)
+		png, err := qrcode.Encode(subURL, qrcode.Medium, 256)
+		if err != nil {
+			http.Error(w, "qr encode error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Write(png)
 	}
 }
 

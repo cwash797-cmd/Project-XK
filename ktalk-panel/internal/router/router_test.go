@@ -5,7 +5,7 @@ import (
 )
 
 func TestRouteExactIP(t *testing.T) {
-	r := New(nil, nil)
+	r := New(nil, nil, nil)
 	_ = r.SetRules([]Rule{
 		{Match: "192.168.1.5", ClientID: "alice"},
 	})
@@ -22,7 +22,7 @@ func TestRouteExactIP(t *testing.T) {
 }
 
 func TestRouteCIDR(t *testing.T) {
-	r := New(nil, nil)
+	r := New(nil, nil, nil)
 	_ = r.SetRules([]Rule{
 		{Match: "10.0.0.0/8", ClientID: "bob"},
 	})
@@ -41,7 +41,7 @@ func TestRouteCIDR(t *testing.T) {
 }
 
 func TestRouteSuffixGlob(t *testing.T) {
-	r := New(nil, nil)
+	r := New(nil, nil, nil)
 	_ = r.SetRules([]Rule{
 		{Match: "*.internal.corp", ClientID: "carol"},
 	})
@@ -65,7 +65,7 @@ func TestRouteSuffixGlob(t *testing.T) {
 }
 
 func TestRouteExactHost(t *testing.T) {
-	r := New(nil, nil)
+	r := New(nil, nil, nil)
 	_ = r.SetRules([]Rule{
 		{Match: "example.com", ClientID: "dave"},
 	})
@@ -82,7 +82,7 @@ func TestRouteExactHost(t *testing.T) {
 }
 
 func TestRouteWildcard(t *testing.T) {
-	r := New(nil, nil)
+	r := New(nil, nil, nil)
 	_ = r.SetRules([]Rule{
 		{Match: "*", ClientID: "wildcard"},
 	})
@@ -96,7 +96,7 @@ func TestRouteWildcard(t *testing.T) {
 }
 
 func TestRouteDefault(t *testing.T) {
-	r := New(nil, nil)
+	r := New(nil, nil, nil)
 	_ = r.SetRules([]Rule{
 		{Match: "10.0.0.0/8", ClientID: "specific"},
 	})
@@ -116,7 +116,7 @@ func TestRouteDefault(t *testing.T) {
 }
 
 func TestRouteNoMatch(t *testing.T) {
-	r := New(nil, nil)
+	r := New(nil, nil, nil)
 	_ = r.SetRules([]Rule{
 		{Match: "10.0.0.0/8", ClientID: "internal"},
 	})
@@ -129,7 +129,7 @@ func TestRouteNoMatch(t *testing.T) {
 
 func TestRoutePriority(t *testing.T) {
 	// Earlier rules take priority
-	r := New(nil, nil)
+	r := New(nil, nil, nil)
 	_ = r.SetRules([]Rule{
 		{Match: "10.0.0.1", ClientID: "specific-ip"},
 		{Match: "10.0.0.0/8", ClientID: "subnet"},
@@ -149,7 +149,7 @@ func TestRoutePriority(t *testing.T) {
 }
 
 func TestCompileInvalidCIDR(t *testing.T) {
-	r := New(nil, nil)
+	r := New(nil, nil, nil)
 	err := r.SetRules([]Rule{
 		{Match: "not-a-cidr/99", ClientID: "x"},
 	})
@@ -159,7 +159,7 @@ func TestCompileInvalidCIDR(t *testing.T) {
 }
 
 func TestTableSummary(t *testing.T) {
-	r := New(nil, nil)
+	r := New(nil, nil, nil)
 	_ = r.SetRules([]Rule{
 		{Match: "10.0.0.0/8", ClientID: "alice"},
 		{Match: "*.example.com", ClientID: "bob"},

@@ -27,9 +27,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/crypto"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/muxer"
 	"github.com/pion/webrtc/v4"
-	"github.com/private/ktalk-core/internal/crypto"
-	"github.com/private/ktalk-core/internal/muxer"
 )
 
 const (

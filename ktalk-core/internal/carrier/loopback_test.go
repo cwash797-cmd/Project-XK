@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/crypto"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/muxer"
 	"github.com/pion/webrtc/v4"
-	"github.com/private/ktalk-core/internal/crypto"
-	"github.com/private/ktalk-core/internal/muxer"
 )
 
 const testKey = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"

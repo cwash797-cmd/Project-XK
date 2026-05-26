@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/private/ktalk-core/internal/roomapi"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/roomapi"
 )
 
 // buildTestServer creates an httptest.Server that responds to /api/rooms/<name>

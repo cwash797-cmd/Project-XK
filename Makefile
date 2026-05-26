@@ -26,6 +26,8 @@ build-core:
 	cd $(CORE_DIR) && go build $(GOFLAGS) -o ../dist/ktalk-core ./cmd/ktalk-core
 
 build-panel: web
+	@test -f $(PANEL_DIR)/web/dist/index.html || \
+		(echo "ERROR: $(PANEL_DIR)/web/dist/index.html missing — run 'make web' first"; exit 1)
 	@echo "Building ktalk-panel…"
 	cd $(PANEL_DIR) && go build $(GOFLAGS) -o ../dist/ktalk-panel ./cmd/ktalk-panel
 

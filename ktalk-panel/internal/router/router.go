@@ -30,7 +30,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/private/ktalk-panel/internal/supervisor"
+	"github.com/cwash797-cmd/Project-XK/ktalk-panel/internal/config"
+	"github.com/cwash797-cmd/Project-XK/ktalk-panel/internal/supervisor"
 )
 
 // Rule maps a destination pattern to a client ID.
@@ -57,6 +58,7 @@ type Router struct {
 	rules     []compiledRule
 	defaultID string
 	sup       *supervisor.Supervisor
+	store     *config.Store
 	log       *slog.Logger
 }
 
@@ -70,10 +72,11 @@ type compiledRule struct {
 }
 
 // New creates a new Router.
-func New(sup *supervisor.Supervisor, log *slog.Logger) *Router {
+func New(sup *supervisor.Supervisor, store *config.Store, log *slog.Logger) *Router {
 	return &Router{
-		sup: sup,
-		log: log,
+		sup:   sup,
+		store: store,
+		log:   log,
 	}
 }
 
@@ -169,6 +172,12 @@ func (r *Router) GetSocksAddr(clientID string) string {
 	states := r.sup.State()
 	for _, s := range states {
 		if s.ClientID == clientID && s.Running {
+			if r.store != nil {
+				if c, ok := r.store.GetClient(clientID); ok && c.SOCKS5Port > 0 {
+					return fmt.Sprintf("127.0.0.1:%d", c.SOCKS5Port)
+				}
+			}
+			// fallback for old clients without explicit port
 			return fmt.Sprintf("127.0.0.1:%d", socksPortForClient(clientID))
 		}
 	}
@@ -244,9 +253,9 @@ func compile(rule Rule) (compiledRule, error) {
 	return cr, nil
 }
 
-// socksPortForClient derives the SOCKS5 port for a client deterministically.
-// In production, this would be stored in the client config.
-// Here we use a simple hash for illustration.
+// socksPortForClient is kept as a fallback for clients created before SOCKS5Port
+// was stored explicitly in config. New clients always have SOCKS5Port set.
+// Deprecated: use config.Client.SOCKS5Port instead.
 func socksPortForClient(clientID string) int {
 	h := 0
 	for _, c := range clientID {

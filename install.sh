@@ -25,6 +25,11 @@
 #   XK_CONFIG_DIR   — config directory (default: /etc/ktalk-panel)
 #   XK_DATA_DIR     — data directory (default: /var/lib/ktalk-panel)
 #   XK_NO_CADDY     — set to 1 to skip Caddy install
+#   DOMAIN          — domain name for Caddy TLS (e.g. panel.example.com)
+#   EMAIL           — email for Let's Encrypt notifications
+#
+# Flags:
+#   --unattended    — skip interactive prompts (requires DOMAIN env var)
 
 set -euo pipefail
 
@@ -43,20 +48,64 @@ XK_INSTALL_DIR="${XK_INSTALL_DIR:-/usr/local/bin}"
 XK_CONFIG_DIR="${XK_CONFIG_DIR:-/etc/ktalk-panel}"
 XK_DATA_DIR="${XK_DATA_DIR:-/var/lib/ktalk-panel}"
 XK_NO_CADDY="${XK_NO_CADDY:-0}"
+XK_DOMAIN="${DOMAIN:-}"
+XK_EMAIL="${EMAIL:-}"
+XK_UNATTENDED=0
 
 # ─── Parse CLI flags ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --panel-port) XK_PANEL_PORT="$2"; shift 2 ;;
-        --listen)     XK_LISTEN_ADDR="$2"; shift 2 ;;
-        --no-caddy)   XK_NO_CADDY=1; shift ;;
-        --version)    XK_VERSION="$2"; shift 2 ;;
+        --panel-port)  XK_PANEL_PORT="$2"; shift 2 ;;
+        --listen)      XK_LISTEN_ADDR="$2"; shift 2 ;;
+        --no-caddy)    XK_NO_CADDY=1; shift ;;
+        --version)     XK_VERSION="$2"; shift 2 ;;
+        --domain)      XK_DOMAIN="$2"; shift 2 ;;
+        --email)       XK_EMAIL="$2"; shift 2 ;;
+        --unattended)  XK_UNATTENDED=1; shift ;;
         *) warn "unknown flag: $1"; shift ;;
     esac
 done
 
 # ─── Root check ───────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || die "This script must be run as root."
+
+# ─── Domain / email prompt ────────────────────────────────────────────────────
+if [[ "$XK_NO_CADDY" != "1" ]]; then
+    if [[ -z "$XK_DOMAIN" && "$XK_UNATTENDED" == "1" ]]; then
+        die "--unattended requires DOMAIN env var or --domain flag to be set."
+    fi
+    if [[ -z "$XK_DOMAIN" ]]; then
+        read -rp "Enter your domain (e.g. panel.example.com): " XK_DOMAIN
+        [[ -n "$XK_DOMAIN" ]] || die "Domain cannot be empty."
+    fi
+    if [[ -z "$XK_EMAIL" && "$XK_UNATTENDED" != "1" ]]; then
+        read -rp "Enter email for Let's Encrypt notifications [optional, press Enter to skip]: " XK_EMAIL
+    fi
+    info "Domain: $XK_DOMAIN"
+    [[ -n "$XK_EMAIL" ]] && info "Email:  $XK_EMAIL"
+
+    # ─── DNS propagation check ────────────────────────────────────────────────
+    info "Checking DNS propagation for $XK_DOMAIN..."
+    SERVER_IP=$(curl -fsSL --max-time 5 https://ipinfo.io/ip 2>/dev/null \
+                || hostname -I 2>/dev/null | awk '{print $1}' || true)
+    DOMAIN_IP=$(dig +short "$XK_DOMAIN" 2>/dev/null | tail -1 || true)
+    if [[ -z "$DOMAIN_IP" ]]; then
+        warn "Cannot resolve $XK_DOMAIN — DNS may not have propagated yet."
+        if [[ "$XK_UNATTENDED" != "1" ]]; then
+            read -rp "Continue anyway? Caddy ACME will fail if domain does not resolve. [y/N] " CONFIRM
+            [[ "$CONFIRM" == [yY]* ]] || die "Aborted by user."
+        fi
+    elif [[ -n "$SERVER_IP" && "$DOMAIN_IP" != "$SERVER_IP" ]]; then
+        warn "$XK_DOMAIN resolves to $DOMAIN_IP but this server's IP is $SERVER_IP."
+        warn "Caddy ACME (Let's Encrypt) will fail if the domain doesn't point here."
+        if [[ "$XK_UNATTENDED" != "1" ]]; then
+            read -rp "Continue anyway? [y/N] " CONFIRM
+            [[ "$CONFIRM" == [yY]* ]] || die "Aborted by user."
+        fi
+    else
+        ok "DNS: $XK_DOMAIN → $DOMAIN_IP"
+    fi
+fi
 
 # ─── Detect arch ──────────────────────────────────────────────────────────────
 ARCH="$(uname -m)"
@@ -86,10 +135,10 @@ case "$PKG_MGR" in
     apt)
         DEBIAN_FRONTEND=noninteractive apt-get update -qq
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            curl wget ca-certificates gnupg lsb-release ufw
+            curl wget ca-certificates gnupg lsb-release ufw dnsutils
         ;;
     dnf|yum)
-        $PKG_MGR install -y -q curl wget ca-certificates firewalld
+        $PKG_MGR install -y -q curl wget ca-certificates firewalld bind-utils
         ;;
 esac
 ok "System dependencies installed"
@@ -220,13 +269,18 @@ ok "Systemd unit written"
 if [[ "$XK_NO_CADDY" != "1" ]]; then
     CADDY_CONF=/etc/caddy/Caddyfile
     if [[ ! -f "$CADDY_CONF" ]] || ! grep -q "ktalk-panel" "$CADDY_CONF" 2>/dev/null; then
+        # Build optional TLS directive
+        TLS_DIRECTIVE=""
+        if [[ -n "$XK_EMAIL" ]]; then
+            TLS_DIRECTIVE="    tls ${XK_EMAIL}"
+        fi
         cat > "$CADDY_CONF" <<EOF
 # Project-XK — managed by install.sh
-# Replace example.com with your real domain.
-# Caddy will auto-obtain TLS from Let's Encrypt.
+# Caddy will auto-obtain TLS from Let's Encrypt for ${XK_DOMAIN}.
 
-example.com {
+${XK_DOMAIN} {
     reverse_proxy ${XK_LISTEN_ADDR}:${XK_PANEL_PORT}
+${TLS_DIRECTIVE}
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -240,8 +294,7 @@ example.com {
     }
 }
 EOF
-        ok "Caddyfile written to ${CADDY_CONF}"
-        warn "ACTION REQUIRED: Edit ${CADDY_CONF} and replace 'example.com' with your domain."
+        ok "Caddyfile written to ${CADDY_CONF} for domain ${XK_DOMAIN}"
     else
         info "Caddyfile already configured, skipping"
     fi
@@ -292,10 +345,8 @@ echo "  Service:    systemctl status ktalk-panel"
 echo ""
 if [[ "$XK_NO_CADDY" != "1" ]]; then
     echo -e "${YELLOW}  NEXT STEPS:${NC}"
-    echo "  1. Edit /etc/caddy/Caddyfile — replace 'example.com' with your domain"
-    echo "  2. systemctl restart caddy"
-    echo "  3. Open https://your-domain/admin in your browser"
-    echo "  4. Set your admin password on first login"
+    echo "  1. Open https://${XK_DOMAIN}/admin in your browser"
+    echo "  2. Set your admin password on first login"
 else
     echo -e "${YELLOW}  NEXT STEPS:${NC}"
     echo "  1. Configure a reverse proxy to ${XK_LISTEN_ADDR}:${XK_PANEL_PORT}"

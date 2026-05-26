@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/private/ktalk-core/internal/metrics"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/metrics"
 )
 
 func TestHealthEndpoint(t *testing.T) {

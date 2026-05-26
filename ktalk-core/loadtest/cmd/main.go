@@ -14,7 +14,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/private/ktalk-core/loadtest"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/loadtest"
 )
 
 func main() {

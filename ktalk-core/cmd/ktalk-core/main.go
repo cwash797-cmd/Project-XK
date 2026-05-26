@@ -20,11 +20,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/private/ktalk-core/internal/carrier"
-	"github.com/private/ktalk-core/internal/config"
-	"github.com/private/ktalk-core/internal/crypto"
-	"github.com/private/ktalk-core/internal/metrics"
-	"github.com/private/ktalk-core/internal/socks5"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/carrier"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/config"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/crypto"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/metrics"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/socks5"
 )
 
 const version = "0.1.0-sprint1"

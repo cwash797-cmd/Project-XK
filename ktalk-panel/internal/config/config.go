@@ -39,6 +39,9 @@ type Client struct {
 	SharedKey string `json:"shared_key"`
 	// SubToken is the secret token for the /sub/:id/:token endpoint.
 	SubToken string `json:"sub_token"`
+	// SOCKS5Port is the explicit local SOCKS5 port for this client (e.g. 20001).
+	// Assigned sequentially at creation time; stored to avoid hash-based guessing.
+	SOCKS5Port int `json:"socks5_port"`
 	// Quota holds bandwidth and traffic limits.
 	Quota Quota `json:"quota"`
 	// CreatedAt is an ISO-8601 timestamp.
@@ -129,6 +132,24 @@ func (s *Store) Update(fn func(*PanelConfig)) error {
 	return s.save()
 }
 
+// nextSOCKS5Port returns the next available SOCKS5 port starting from 20001.
+// Must be called with s.mu held (read-lock sufficient for reading, but
+// called from AddClient which holds the write-lock via Update).
+func (s *Store) nextSOCKS5Port() int {
+	const base = 20001
+	used := make(map[int]bool, len(s.cfg.Clients))
+	for _, c := range s.cfg.Clients {
+		if c.SOCKS5Port > 0 {
+			used[c.SOCKS5Port] = true
+		}
+	}
+	for port := base; ; port++ {
+		if !used[port] {
+			return port
+		}
+	}
+}
+
 // AddClient appends a new client with generated credentials.
 func (s *Store) AddClient(name, comment, subdomain, roomID, hash string, quota Quota) (Client, error) {
 	key, err := randHex(32)
@@ -144,6 +165,10 @@ func (s *Store) AddClient(name, comment, subdomain, roomID, hash string, quota Q
 		return Client{}, fmt.Errorf("generate id: %w", err)
 	}
 
+	s.mu.Lock()
+	port := s.nextSOCKS5Port()
+	s.mu.Unlock()
+
 	c := Client{
 		ID:      id,
 		Name:    name,
@@ -153,10 +178,11 @@ func (s *Store) AddClient(name, comment, subdomain, roomID, hash string, quota Q
 			RoomID:    roomID,
 			Hash:      hash,
 		},
-		SharedKey: key,
-		SubToken:  tok,
-		Quota:     quota,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		SharedKey:  key,
+		SubToken:   tok,
+		SOCKS5Port: port,
+		Quota:      quota,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 	}
 
 	if err := s.Update(func(cfg *PanelConfig) {

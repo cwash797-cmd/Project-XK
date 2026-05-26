@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/private/ktalk-panel/internal/config"
+	"github.com/cwash797-cmd/Project-XK/ktalk-panel/internal/config"
 )
 
 const (
@@ -26,17 +26,18 @@ const (
 
 // Process represents a running (or recently stopped) ktalk-core child process.
 type Process struct {
-	ClientID  string
-	Client    config.Client
-	cmd       *exec.Cmd
-	logs      *logRing
-	startedAt time.Time
-	exitedAt  time.Time
-	exitErr   string
-	restarts  int
-	running   bool
-	mu        sync.RWMutex
-	done      chan struct{}
+	ClientID    string
+	Client      config.Client
+	cmd         *exec.Cmd
+	logs        *logRing
+	startedAt   time.Time
+	exitedAt    time.Time
+	exitErr     string
+	restarts    int
+	running     bool
+	lastHealthy time.Time // last time ICE was confirmed connected
+	mu          sync.RWMutex
+	done        chan struct{}
 }
 
 // LogLine is a single line with a timestamp.
@@ -47,25 +48,50 @@ type LogLine struct {
 
 // ProcessState is a JSON-serialisable snapshot of process status.
 type ProcessState struct {
-	ClientID  string    `json:"client_id"`
-	Running   bool      `json:"running"`
-	StartedAt time.Time `json:"started_at,omitempty"`
-	ExitedAt  time.Time `json:"exited_at,omitempty"`
-	ExitErr   string    `json:"exit_err,omitempty"`
-	Restarts  int       `json:"restarts"`
+	ClientID    string    `json:"client_id"`
+	Running     bool      `json:"running"`
+	Healthy     bool      `json:"healthy"`
+	LastHealthy time.Time `json:"last_heartbeat,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	ExitedAt    time.Time `json:"exited_at,omitempty"`
+	ExitErr     string    `json:"exit_err,omitempty"`
+	Restarts    int       `json:"restarts"`
 }
 
 // State returns a snapshot of the process status.
 func (p *Process) State() ProcessState {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	// Consider tunnel healthy if it was seen connected within the last 90 seconds.
+	healthy := p.running && !p.lastHealthy.IsZero() &&
+		time.Since(p.lastHealthy) < 90*time.Second
 	return ProcessState{
-		ClientID:  p.ClientID,
-		Running:   p.running,
-		StartedAt: p.startedAt,
-		ExitedAt:  p.exitedAt,
-		ExitErr:   p.exitErr,
-		Restarts:  p.restarts,
+		ClientID:    p.ClientID,
+		Running:     p.running,
+		Healthy:     healthy,
+		LastHealthy: p.lastHealthy,
+		StartedAt:   p.startedAt,
+		ExitedAt:    p.exitedAt,
+		ExitErr:     p.exitErr,
+		Restarts:    p.restarts,
+	}
+}
+
+// MarkHealthy records the current time as the last known-healthy timestamp.
+// Call this whenever the tunnel confirms an ICE connected state.
+func (p *Process) MarkHealthy() {
+	p.mu.Lock()
+	p.lastHealthy = time.Now()
+	p.mu.Unlock()
+}
+
+// MarkHealthyByID updates the last-healthy timestamp for the given client.
+func (s *Supervisor) MarkHealthyByID(clientID string) {
+	s.mu.RLock()
+	p, ok := s.processes[clientID]
+	s.mu.RUnlock()
+	if ok {
+		p.MarkHealthy()
 	}
 }
 

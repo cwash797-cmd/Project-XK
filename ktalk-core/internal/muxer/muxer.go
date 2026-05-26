@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/private/ktalk-core/internal/crypto"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/crypto"
 )
 
 // cryptoRand wraps rand.Read so we can reference it without colliding with
