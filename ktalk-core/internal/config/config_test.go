@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/private/ktalk-core/internal/config"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/config"
 )
 
 // baseRoom returns a RoomConfig populated with data confirmed from DevTools 2026-05-19.

@@ -21,14 +21,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/config"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/crypto"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/jingle"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/muxer"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/names"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/roomapi"
+	"github.com/cwash797-cmd/Project-XK/ktalk-core/internal/xmpp"
 	"github.com/pion/webrtc/v4"
-	"github.com/private/ktalk-core/internal/config"
-	"github.com/private/ktalk-core/internal/crypto"
-	"github.com/private/ktalk-core/internal/jingle"
-	"github.com/private/ktalk-core/internal/muxer"
-	"github.com/private/ktalk-core/internal/names"
-	"github.com/private/ktalk-core/internal/roomapi"
-	"github.com/private/ktalk-core/internal/xmpp"
 )
 
 const (

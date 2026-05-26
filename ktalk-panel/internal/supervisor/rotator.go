@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/private/ktalk-panel/internal/config"
+	"github.com/cwash797-cmd/Project-XK/ktalk-panel/internal/config"
 )
 
 // KeyRotationInterval is how often each client's encryption key is automatically
