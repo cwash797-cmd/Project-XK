@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-web:
+    name: Build SvelteKit frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: ktalk-panel/web/pnpm-lock.yaml
+      - name: Install & build
+        run: cd ktalk-panel/web && pnpm install --frozen-lockfile && pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: ktalk-panel/web/dist/
+          retention-days: 1
+
+  build-binaries:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    needs: build-web
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            suffix: linux-amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            suffix: linux-arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            suffix: windows-amd64
+            ext: .exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: |
+            ktalk-core/go.sum
+            ktalk-panel/go.sum
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: ktalk-panel/web/dist/
+      - name: Build ktalk-core
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          cd ktalk-core
+          go build -trimpath -ldflags="-s -w" \
+            -o ../dist/ktalk-core-${{ matrix.suffix }}${{ matrix.ext }} \
+            ./cmd/ktalk-core
+      - name: Build ktalk-panel
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          cd ktalk-panel
+          go build -trimpath -ldflags="-s -w" \
+            -o ../dist/ktalk-panel-${{ matrix.suffix }}${{ matrix.ext }} \
+            ./cmd/ktalk-panel
+      - name: Package Windows zip
+        if: matrix.goos == 'windows'
+        run: |
+          cd dist
+          zip ktalk-windows-amd64.zip \
+            ktalk-core-windows-amd64.exe \
+            ktalk-panel-windows-amd64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.suffix }}
+          path: dist/
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-binaries
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: all-dist/
+          merge-multiple: true
+      - name: SHA256 checksums
+        run: |
+          cd all-dist
+          sha256sum \
+            ktalk-core-linux-amd64 \
+            ktalk-panel-linux-amd64 \
+            ktalk-core-linux-arm64 \
+            ktalk-panel-linux-arm64 \
+            ktalk-core-windows-amd64.exe \
+            ktalk-panel-windows-amd64.exe \
+            ktalk-windows-amd64.zip \
+            > SHA256SUMS.txt 2>/dev/null || true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Project-XK ${{ github.ref_name }}"
+          body: |
+            ## Project-XK ${{ github.ref_name }}
+
+            ### Установка на сервер (Linux)
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/cwash797-cmd/Project-XK/main/install.sh | bash
+            ```
+
+            ### Файлы
+            | Файл | Платформа |
+            |------|-----------|
+            | `ktalk-core-linux-amd64` + `ktalk-panel-linux-amd64` | Linux x86_64 |
+            | `ktalk-core-linux-arm64` + `ktalk-panel-linux-arm64` | Linux ARM64 |
+            | `ktalk-windows-amd64.zip` | Windows 10/11 x64 |
+          files: |
+            all-dist/ktalk-core-linux-amd64
+            all-dist/ktalk-panel-linux-amd64
+            all-dist/ktalk-core-linux-arm64
+            all-dist/ktalk-panel-linux-arm64
+            all-dist/ktalk-core-windows-amd64.exe
+            all-dist/ktalk-panel-windows-amd64.exe
+            all-dist/ktalk-windows-amd64.zip
+            all-dist/SHA256SUMS.txt
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') }}
