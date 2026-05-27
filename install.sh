@@ -210,7 +210,7 @@ fi
 
 # ─── Create directories ───────────────────────────────────────────────────────
 mkdir -p "${XK_CONFIG_DIR}" "${XK_DATA_DIR}"
-chown xk:xk "${XK_DATA_DIR}"
+chown xk:xk "${XK_CONFIG_DIR}" "${XK_DATA_DIR}"
 chmod 750 "${XK_CONFIG_DIR}" "${XK_DATA_DIR}"
 ok "Directories created"
 
