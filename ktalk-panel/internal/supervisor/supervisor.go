@@ -325,9 +325,17 @@ func (s *Supervisor) watch(ctx context.Context, clientID string, p *Process) {
 // The panel cannot import ktalk-core as a library (separate module),
 // so we encode the JSON payload inline and base64url it.
 func buildURI(client config.Client) (string, error) {
+	// Use the explicitly-assigned SOCKS5 port (20001+).
+	// Fall back to 1080 only for legacy clients that predate sequential assignment.
+	socks5Port := client.SOCKS5Port
+	if socks5Port == 0 {
+		socks5Port = 1080
+	}
+	socks5Addr := fmt.Sprintf("127.0.0.1:%d", socks5Port)
+
 	payload := fmt.Sprintf(
-		`{"mode":"creator","room":{"subdomain":%q,"room_id":%q,"hash":%q},"crypto":{"key":%q},"net":{"dns_server":"1.1.1.1:53"}}`,
-		client.Room.Subdomain, client.Room.RoomID, client.Room.Hash, client.SharedKey,
+		`{"mode":"creator","room":{"subdomain":%q,"room_id":%q,"hash":%q},"crypto":{"key":%q},"net":{"dns_server":"1.1.1.1:53"},"socks5":{"listen_addr":%q}}`,
+		client.Room.Subdomain, client.Room.RoomID, client.Room.Hash, client.SharedKey, socks5Addr,
 	)
 	b64 := rawBase64URL([]byte(payload))
 	return "ktalk://" + b64, nil
