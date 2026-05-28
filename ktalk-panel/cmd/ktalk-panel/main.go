@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"mime"
 	"net/http"
 	"os"
 	"os/signal"
@@ -41,6 +42,23 @@ import (
 
 //go:embed web/dist
 var webFS embed.FS
+
+func init() {
+	// Register MIME types explicitly so Go's http.FileServer serves correct
+	// Content-Type headers on minimal Linux systems that lack /etc/mime.types.
+	// Without this, CSS and JS files are served as "text/plain", causing
+	// browsers with X-Content-Type-Options: nosniff to reject them.
+	_ = mime.AddExtensionType(".js", "application/javascript; charset=utf-8")
+	_ = mime.AddExtensionType(".mjs", "application/javascript; charset=utf-8")
+	_ = mime.AddExtensionType(".css", "text/css; charset=utf-8")
+	_ = mime.AddExtensionType(".html", "text/html; charset=utf-8")
+	_ = mime.AddExtensionType(".json", "application/json")
+	_ = mime.AddExtensionType(".svg", "image/svg+xml")
+	_ = mime.AddExtensionType(".png", "image/png")
+	_ = mime.AddExtensionType(".ico", "image/x-icon")
+	_ = mime.AddExtensionType(".woff2", "font/woff2")
+	_ = mime.AddExtensionType(".woff", "font/woff")
+}
 
 var (
 	sessions = auth.NewSessionStore()
