@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v[0-9]*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -60,7 +61,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: web-dist
-          path: ktalk-panel/web/dist/
+          # CRITICAL: //go:embed web/dist is relative to main.go at
+          # ktalk-panel/cmd/ktalk-panel/ — dist MUST land here:
+          path: ktalk-panel/cmd/ktalk-panel/web/dist/
+      - name: Verify embed path
+        run: |
+          test -f ktalk-panel/cmd/ktalk-panel/web/dist/index.html \
+            || (echo "ERROR: frontend index.html missing from embed path" && exit 1)
+          echo "OK: $(ls ktalk-panel/cmd/ktalk-panel/web/dist/ | wc -l) files in embed dir"
       - name: Build ktalk-core
         env:
           GOOS: ${{ matrix.goos }}
@@ -118,17 +126,26 @@ jobs:
             ktalk-panel-windows-amd64.exe \
             ktalk-windows-amd64.zip \
             > SHA256SUMS.txt 2>/dev/null || true
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0-manual")
+            echo "name=${TAG}" >> $GITHUB_OUTPUT
+          else
+            echo "name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: "Project-XK ${{ github.ref_name }}"
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: "Project-XK ${{ steps.tag.outputs.name }}"
           body: |
-            ## Project-XK ${{ github.ref_name }}
+            ## Project-XK ${{ steps.tag.outputs.name }}
 
             ### Установка на сервер (Linux)
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/cwash797-cmd/Project-XK/main/install.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/cwash797-cmd/Project-XK/main/install.sh | sudo bash
             ```
 
             ### Файлы
@@ -147,4 +164,4 @@ jobs:
             all-dist/ktalk-windows-amd64.zip
             all-dist/SHA256SUMS.txt
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') }}
+          prerelease: ${{ contains(steps.tag.outputs.name, '-rc') || contains(steps.tag.outputs.name, '-beta') }}
