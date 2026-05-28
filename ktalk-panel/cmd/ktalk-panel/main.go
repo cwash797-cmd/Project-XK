@@ -579,15 +579,16 @@ func handleSubscription(store *config.Store) http.HandlerFunc {
 			return
 		}
 
-		// Legacy text/plain — ktalk:// URI for old clients / manual use
-		uri := buildJoinerURI(c)
+		// text/plain — kvas:// URI format consumed by kvas-client (Windows/Linux GUI).
+		// Headers use #kvas-* prefix; URI encodes {room_url, shared_key} as kvas://base64.
+		uri := buildKvasURI(c)
 
 		var sb strings.Builder
-		fmt.Fprintf(&sb, "#ktalk-speed-mbps:%d\n", c.Quota.SpeedMbps)
-		fmt.Fprintf(&sb, "#ktalk-traffic-gb:%d\n", c.Quota.TrafficGB)
-		fmt.Fprintf(&sb, "#ktalk-used-gb:%.3f\n", usedGB)
-		fmt.Fprintf(&sb, "#ktalk-expires-at:%s\n", c.Quota.ExpiresAt)
-		fmt.Fprintf(&sb, "#ktalk-status:%s\n", status)
+		fmt.Fprintf(&sb, "#kvas-speed-mbps:%d\n", c.Quota.SpeedMbps)
+		fmt.Fprintf(&sb, "#kvas-traffic-gb:%d\n", c.Quota.TrafficGB)
+		fmt.Fprintf(&sb, "#kvas-used-gb:%.3f\n", usedGB)
+		fmt.Fprintf(&sb, "#kvas-expires-at:%s\n", c.Quota.ExpiresAt)
+		fmt.Fprintf(&sb, "#kvas-status:%s\n", status)
 		fmt.Fprintf(&sb, "%s\n", uri)
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -655,13 +656,14 @@ func handleQRSub(store *config.Store) http.HandlerFunc {
 	}
 }
 
-// buildJoinerURI constructs the ktalk:// URI for the Joiner (client) side.
-func buildJoinerURI(c config.Client) string {
-	payload := fmt.Sprintf(
-		`{"mode":"joiner","room":{"subdomain":%q,"room_id":%q,"hash":%q},"crypto":{"key":%q},"net":{"dns_server":"1.1.1.1:53"},"socks5":{"listen_addr":"127.0.0.1:1080"}}`,
-		c.Room.Subdomain, c.Room.RoomID, c.Room.Hash, c.SharedKey,
-	)
-	return "ktalk://" + encodeBase64URL([]byte(payload))
+// buildKvasURI constructs a kvas:// URI for kvas-client.
+// Format expected by kvas-client/internal/config.DecodeURI:
+//
+//	kvas://<base64url({"room_url":"https://sub.ktalk.ru/room_id","shared_key":"hex64"})>
+func buildKvasURI(c config.Client) string {
+	roomURL := fmt.Sprintf("https://%s.ktalk.ru/%s", c.Room.Subdomain, c.Room.RoomID)
+	payload := fmt.Sprintf(`{"room_url":%q,"shared_key":%q}`, roomURL, c.SharedKey)
+	return "kvas://" + encodeBase64URL([]byte(payload))
 }
 
 // encodeBase64URL encodes b as base64url without padding (RFC 4648 §5).
