@@ -40,7 +40,7 @@ import (
 	"github.com/cwash797-cmd/Project-XK/ktalk-panel/internal/supervisor"
 )
 
-//go:embed web/dist
+//go:embed all:web/dist
 var webFS embed.FS
 
 func init() {
