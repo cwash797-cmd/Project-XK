@@ -178,16 +178,26 @@ func buildRouter(store *config.Store, sup *supervisor.Supervisor, broker *sse.Br
 		}))
 	}
 
-	// Admin SPA catch-all: /admin, /admin/, /admin/* all serve index.html.
-	// SvelteKit's client-side router takes over after the initial HTML load.
-	mux.HandleFunc("/admin", serveIndex)
-	mux.HandleFunc("/admin/", serveIndex)
+	// /admin and /admin/ redirect to / — the SvelteKit app lives at the root.
+	// SvelteKit routes are: / (dashboard), /login, /setup.
+	// The app handles auth redirects itself in onMount.
+	redirect := func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusFound)
+	}
+	mux.HandleFunc("/admin", redirect)
+	mux.HandleFunc("/admin/", redirect)
+
+	// SPA fallback: serve index.html for /login and /setup (SvelteKit client routes).
+	mux.HandleFunc("/login", serveIndex)
+	mux.HandleFunc("/login/", serveIndex)
+	mux.HandleFunc("/setup", serveIndex)
+	mux.HandleFunc("/setup/", serveIndex)
 
 	// Static assets: /_app/, /favicon.png, etc.
-	// Must be registered BEFORE "/" so specific paths win.
+	// Registered before "/" catch-all so they take priority.
 	if staticFS != nil {
 		mux.Handle("/_app/", http.FileServer(http.FS(staticFS)))
-		// Serve any other static file that exists (favicon.png, robots.txt, etc.)
+		// "/" serves index.html (via FileServer fallback) and all static files.
 		mux.Handle("/", http.FileServer(http.FS(staticFS)))
 	}
 
