@@ -159,12 +159,12 @@ func buildRouter(store *config.Store, sup *supervisor.Supervisor, broker *sse.Br
 
 	// Static files (embedded SvelteKit build)
 	staticFS, err := fs.Sub(webFS, "web/dist")
-	if err == nil {
-		mux.Handle("/", http.FileServer(http.FS(staticFS)))
+	if err != nil {
+		log.Error("failed to sub web/dist from embed", "err", err)
 	}
 
-	// Admin SPA — serve index.html for /admin (SPA catch-all)
-	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
+	// serveIndex serves the embedded index.html for SPA routes.
+	serveIndex := func(w http.ResponseWriter, r *http.Request) {
 		f, err := staticFS.Open("index.html")
 		if err != nil {
 			http.NotFound(w, r)
@@ -176,7 +176,20 @@ func buildRouter(store *config.Store, sup *supervisor.Supervisor, broker *sse.Br
 			fs.File
 			io.ReadSeeker
 		}))
-	})
+	}
+
+	// Admin SPA catch-all: /admin, /admin/, /admin/* all serve index.html.
+	// SvelteKit's client-side router takes over after the initial HTML load.
+	mux.HandleFunc("/admin", serveIndex)
+	mux.HandleFunc("/admin/", serveIndex)
+
+	// Static assets: /_app/, /favicon.png, etc.
+	// Must be registered BEFORE "/" so specific paths win.
+	if staticFS != nil {
+		mux.Handle("/_app/", http.FileServer(http.FS(staticFS)))
+		// Serve any other static file that exists (favicon.png, robots.txt, etc.)
+		mux.Handle("/", http.FileServer(http.FS(staticFS)))
+	}
 
 	// Auth endpoints (no session required)
 	mux.HandleFunc("/api/auth/setup", handleSetup(store))
