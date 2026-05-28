@@ -130,7 +130,12 @@ jobs:
         id: tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0-manual")
+            # Shallow clone has no tag history — use GitHub API instead of git describe
+            TAG=$(curl -fsSL \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/tags?per_page=1" \
+              | python3 -c "import sys,json; tags=json.load(sys.stdin); print(tags[0]['name'] if tags else 'v0.0.0-dev')")
             echo "name=${TAG}" >> $GITHUB_OUTPUT
           else
             echo "name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
