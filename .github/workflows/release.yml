@@ -66,9 +66,18 @@ jobs:
           path: ktalk-panel/cmd/ktalk-panel/web/dist/
       - name: Verify embed path
         run: |
-          test -f ktalk-panel/cmd/ktalk-panel/web/dist/index.html \
+          DIST=ktalk-panel/cmd/ktalk-panel/web/dist
+          # Check index.html exists
+          test -f "${DIST}/index.html" \
             || (echo "ERROR: frontend index.html missing from embed path" && exit 1)
-          echo "OK: $(ls ktalk-panel/cmd/ktalk-panel/web/dist/ | wc -l) files in embed dir"
+          # Check _app/ directory exists (SvelteKit immutable assets)
+          # Without it the binary has a white page — all JS/CSS return 404
+          test -d "${DIST}/_app" \
+            || (echo "ERROR: _app/ directory missing — SvelteKit build did not produce assets" && exit 1)
+          # Count total files including _app/ (Go embed 'all:' prefix required for _ dirs)
+          TOTAL=$(find "${DIST}" -type f | wc -l)
+          JS_COUNT=$(find "${DIST}/_app" -name '*.js' | wc -l)
+          echo "OK: ${TOTAL} total files in embed dir, ${JS_COUNT} JS files in _app/"
       - name: Build ktalk-core
         env:
           GOOS: ${{ matrix.goos }}
